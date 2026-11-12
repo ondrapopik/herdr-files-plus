@@ -4,14 +4,45 @@
 // files-plus: audio plays in a bar at the bottom (media.js); video opens in the system player.
 // files-plus: copies from another machine show a progress bar at the bottom; Markdown opens as a rendered preview.
 // files-plus: right-click → Download saves a file of another machine to ~/Downloads; files dropped on the panel are uploaded.
-import { View, div, svg } from "gpui-kit";
+// files-plus: the Markdown preview shows its local images; a PDF shows its first page.
+import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, InputState, Input, TextView } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, openOverlay, notify, home } from "herdr";
 import { Buffer } from "buffer";
-import { Player, AUDIO, VIDEO, HTML, openVideo, openInBrowser, sweepCache, newDownload, downloadView, download, upload } from "./media.js";
+import { Player, AUDIO, VIDEO, HTML, openVideo, openInBrowser, sweepCache, newDownload, downloadView, download, upload, stageImage, pdfPreview } from "./media.js";
 
 const IMAGE = /\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?)$/i;
 const MARKDOWN = /\.(md|markdown|mdown|mkd)$/i;
+const PDF = /\.pdf$/i;
+// ![alt](src "title"), also wrapped in a link [![alt](src)](href), or <img src="…">
+const IMG = /\[?!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+["'][^"']*["'])?\s*\)(?:\]\([^)]*\))?|<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi;
+const WEB = /^(https?:|data:|\/\/)/i;
+const MAX_MD_IMAGES = 40;
+
+// TextView draws no images, so the Markdown is split into text and local images, in order.
+// Images from the web stay in the text as their alt text.
+function mdParts(text) {
+  const parts = [];
+  let buf = [], fence = null;
+  const flush = () => { if (buf.length) { parts.push({ text: buf.join("\n") }); buf = []; } };
+  for (const line of text.split("\n")) {
+    const f = line.match(/^\s*(```+|~~~+)/);
+    if (f) { if (!fence) fence = f[1][0]; else if (f[1][0] === fence) fence = null; buf.push(line); continue; }
+    if (fence || (!line.includes("![") && !/<img/i.test(line))) { buf.push(line); continue; }
+    let last = 0, pending = "", any = false;
+    for (const m of line.matchAll(IMG)) {
+      const src = m[2] ?? m[3], alt = m[1] ?? m[0].match(/\balt\s*=\s*["']([^"']*)["']/i)?.[1] ?? "";
+      pending += line.slice(last, m.index); last = m.index + m[0].length;
+      if (WEB.test(src)) { pending += alt; continue; }
+      if (pending.trim()) buf.push(pending);
+      pending = ""; flush(); parts.push({ image: src, alt }); any = true;
+    }
+    pending += line.slice(last);
+    if (!any || pending.trim()) buf.push(pending);
+  }
+  flush();
+  return parts;
+}
 
 function location() {
   const space = spaces().find(s => s.active), f = focused();
@@ -76,6 +107,7 @@ export default class Files extends View {
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
     this.player = new Player();
     this.transfer = null; this.queue = [];
+    this.mdImages = new Map(); this.pdf = null;
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
     cx.timer.every(1000, cx => { this.player.tick(cx); if (this.transfer) cx.notify(); }); // only does work while a track plays or a copy runs
@@ -170,7 +202,9 @@ export default class Files extends View {
     this.original = null; this.stamp = null; this.editable = false; this.dirty = false;
     this.saving = false; this.saveError = null; this.saveNote = null; this.leaving = null;
     this.preview = Boolean(path) && MARKDOWN.test(path);
+    this.pdf = null; this.mdImages = new Map();
     if (!path || !cx) return;
+    if (PDF.test(path)) return this.loadPdf(path, cx);
     const context = this.context, root = this.root, on = this.on, abs = `${root}/${path}`;
     cx.spawn(async cx => {
       try {
@@ -192,6 +226,7 @@ export default class Files extends View {
         this.dirty = resume !== null && resume !== text;
         if (draft?.path === path && resume === null) this.saveNote = "The file changed on disk; your unsaved edits were dropped";
         const code = this.code;
+        this.loadMdImages(cx);
         code.on("change", (_e, cx) => {
           if (this.code !== code) return;
           const dirty = code.value() !== this.original;
@@ -401,7 +436,8 @@ export default class Files extends View {
         .child(div().font_semibold().child("Files"))
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.file ?? this.root?.split(/[\\/]/).pop() ?? ""))
         .when(Boolean(this.file) && this.dirty, el => el.child(div().flex_none().text_color(t.blocked).child("●")))
-        .when(Boolean(this.file) && Boolean(this.code) && MARKDOWN.test(this.file ?? ""), el => el.child(this.button("files-md-mode", this.preview ? "Source" : "Preview", cx => { this.preview = !this.preview; cx.notify(); }, t)))
+        .when(Boolean(this.file) && Boolean(this.code) && MARKDOWN.test(this.file ?? ""), el => el.child(this.button("files-md-mode", this.preview ? "Source" : "Preview", cx => { this.preview = !this.preview; this.loadMdImages(cx); cx.notify(); }, t)))
+        .when(this.pdf?.status === "ready", el => el.child(this.button("files-pdf-open", "Open", () => { exec(window()?.platform === "macos" ? "open" : "xdg-open", [this.pdf.local]).catch(() => null); }, t)))
         .when(Boolean(this.file) && this.editable, el => el.child(this.button("files-save", this.saving ? "Saving…" : "Save", cx => this.save(cx), t, this.dirty ? "primary" : undefined)))
         .when(Boolean(this.file) && Boolean(this.code) && !this.editable, el => el.child(div().flex_none().text_size(11).text_color(t.dim).child("read-only")))
         .when(!this.file && Boolean(this.root), el => el.child(div().id("files-new").w(20).flex_none().text_center().cursor_pointer().text_color(t.muted).hover(s => s.text_color(t.foreground))
@@ -425,9 +461,16 @@ export default class Files extends View {
         .text_color(this.saveError ? t.ansi1 : t.dim)
         .child(div().flex_1().min_w(0).child(this.saveError || this.saveNote))
         .when(Boolean(this.saveError), el => el.child(this.button("files-reload", "Reload from disk", cx => { this.dirty = false; this.show(this.file, cx); }, t)))))
-      .when(Boolean(this.file), el => el.child(this.code && this.preview
-        ? v_flex().id("files-markdown").flex_1().min_h(0).overflow_y_scrollbar().px(16).py(12).text_size(13)
-          .child(TextView.markdown(`files-md-${this.file}`, this.code.value()).selectable(true).on_link_click((url, cx) => this.followLink(url, cx)))
+      .when(Boolean(this.file), el => el.child(this.pdf
+        ? v_flex().id("files-pdf").flex_1().min_h(0).overflow_y_scrollbar().p(12).gap(8).on_size_change((size, cx) => this.measure(size, cx))
+          .child(this.pdf.status === "ready" ? this.picture(this.pdf, "files-pdf-page", t) : div().text_size(12).text_color(this.pdf.status === "error" ? t.ansi1 : t.dim).child(this.pdf.note))
+          .when(this.pdf.status === "ready", el => el.child(div().text_size(11).text_color(t.dim)
+            .child(`Page 1${this.pdf.pages ? ` of ${this.pdf.pages}` : ""} · Open shows ${this.pdf.pages === 1 ? "it" : "every page"} in your PDF app`)))
+        : this.code && this.preview
+        ? v_flex().id("files-markdown").flex_1().min_h(0).overflow_y_scrollbar().px(16).py(12).text_size(13).on_size_change((size, cx) => this.measure(size, cx))
+          .children(mdParts(this.code.value()).map((part, i) => part.text !== undefined
+            ? TextView.markdown(`files-md-${this.file}-${i}`, part.text).selectable(true).on_link_click((url, cx) => this.followLink(url, cx))
+            : this.mdImage(part, i, t)))
         : this.code
         ? v_flex().id("files-editor").flex_1().min_h(0)
           .on_key_down((e, cx) => {
@@ -507,6 +550,77 @@ export default class Files extends View {
       } catch (e) {
         if (!e?.cancelled) notify({ title: job.up ? "Upload failed" : "Download failed", body: `${job.name}: ${String(e?.message ?? e)}`, level: "error" });
       } finally { if (this.transfer === job) this.next(cx); }
+    });
+  }
+
+  // The width for pictures in the preview: the pane in unzoomed px, minus the padding.
+  measure(size, cx) {
+    const zoom = Number(settings()?.zoom) > 0 ? Number(settings().zoom) : 1;
+    const width = Math.max(80, Math.floor(size.width / zoom) - 32);
+    if (width !== this.viewWidth) { this.viewWidth = width; cx.notify(); }
+  }
+
+  // A staged picture ({ rel, w, h }) at its size, never wider than the pane; unknown size: a box it fits in.
+  picture(p, id, t) {
+    const max = this.viewWidth ?? 360, s = p.w && p.h ? Math.min(1, max / p.w) : 0;
+    return div().id(id).flex_none().child(s ? image(p.rel).w(p.w * s).h(p.h * s) : image(p.rel).w(Math.min(max, 480)).h(240));
+  }
+
+  // Where a Markdown image points: absolute, here or on the space's machine.
+  mdImagePath(src) {
+    let p = src;
+    try { p = decodeURIComponent(src); } catch { /* keep it */ }
+    p = p.replace(/^file:\/\//, "").split(/[?#]/)[0];
+    const parts = [];
+    for (const x of (p.startsWith("/") ? p : `${this.root}/${parentOf(this.file ?? "")}/${p}`).split("/")) {
+      if (x === "..") parts.pop(); else if (x && x !== ".") parts.push(x);
+    }
+    return "/" + parts.join("/");
+  }
+
+  // Copies the preview's images into the app folder (image() loads only there), one after another.
+  loadMdImages(cx) {
+    if (!this.code || !this.preview || !MARKDOWN.test(this.file ?? "")) return;
+    const on = this.on ?? null, images = this.mdImages;
+    const todo = [...new Set(mdParts(this.code.value()).filter(p => p.image).map(p => this.mdImagePath(p.image)))]
+      .slice(0, MAX_MD_IMAGES).filter(abs => !images.has(abs));
+    if (!todo.length) return;
+    for (const abs of todo) images.set(abs, { status: "loading" });
+    cx.spawn(async cx => {
+      for (const abs of todo) {
+        if (this.mdImages !== images) return;
+        const entry = images.get(abs);
+        try {
+          if (!IMAGE.test(abs)) throw new Error("not an image");
+          Object.assign(entry, await stageImage(abs, on), { status: "ready" });
+        } catch (e) { Object.assign(entry, { status: "error", error: String(e?.message ?? e) }); }
+        cx.notify();
+      }
+    });
+  }
+
+  mdImage(part, i, t) {
+    const abs = this.mdImagePath(part.image), e = this.mdImages.get(abs), label = part.alt || baseOf(abs);
+    if (e?.status === "ready") return div().id(`files-md-img-${i}`).flex_none().py(6).cursor_pointer()
+      .on_click(() => { if (abs.startsWith(`${this.root}/`)) this.openImage(abs.slice(this.root.length + 1)); })
+      .child(this.picture(e, `files-md-pic-${i}`, t));
+    return div().id(`files-md-img-${i}`).flex_none().py(4).text_size(12).text_color(e?.status === "error" ? t.ansi1 : t.dim)
+      .child(e?.status === "error" ? `🖼 ${label}: ${e.error}` : !e ? `🖼 ${label}` : `🖼 ${label} …`);
+  }
+
+  // A PDF: its first page rendered here (copied first from another machine), Open for the rest.
+  loadPdf(path, cx) {
+    const src = `${this.root}/${path}`, on = this.on ?? null;
+    const pdf = this.pdf = { status: "loading", note: "Rendering the first page…" };
+    cx.spawn(async cx => {
+      try {
+        const r = await pdfPreview(src, on, {
+          progress: (done, total) => { pdf.note = `Copying from ${on}… ${Math.round(done / Math.max(1, total) * 100)} %`; if (this.pdf === pdf) cx.notify(); },
+          cancelled: () => this.pdf !== pdf,
+        });
+        Object.assign(pdf, r, { status: "ready" });
+      } catch (e) { if (!e?.cancelled) Object.assign(pdf, { status: "error", note: `Cannot preview this PDF: ${String(e?.message ?? e)}` }); }
+      finally { if (this.pdf === pdf) cx.notify(); }
     });
   }
 

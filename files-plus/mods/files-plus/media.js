@@ -4,7 +4,7 @@
 // Files on another machine are first copied to data/files-plus-media/ (swept after a day).
 import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, appHome, notify } from "herdr";
+import { exec, appHome, notify, window } from "herdr";
 
 export const AUDIO = /\.(mp3|m4a|aac|wav|aiff?|flac|ogg|oga|opus|caf|alac|wma)$/i;
 export const VIDEO = /\.(mp4|m4v|mov|mkv|webm|avi|wmv|flv|mpe?g|3gp|ts)$/i;
@@ -129,8 +129,58 @@ export async function upload(src, on, dst, hooks = {}) {
   return dst;
 }
 
+// Width and height in pixels of a local image ("0 0" when unknown): sips on macOS, file on Linux.
+async function dimensions(path) {
+  try {
+    if (window()?.platform === "macos") {
+      const r = await exec("sips", ["-g", "pixelWidth", "-g", "pixelHeight", path]);
+      const w = r.stdout.match(/pixelWidth:\s*(\d+)/), h = r.stdout.match(/pixelHeight:\s*(\d+)/);
+      if (w && h) return { w: Number(w[1]), h: Number(h[1]) };
+    } else {
+      const m = (await exec("file", ["-b", path])).stdout.match(/(\d+)\s*x\s*(\d+)/);
+      if (m) return { w: Number(m[1]), h: Number(m[2]) };
+    }
+  } catch { /* unknown */ }
+  return { w: 0, h: 0 };
+}
+
+const relToApp = path => path.slice(appHome().length + 1);
+const MAX_IMAGE = 25 * 1024 * 1024;
+
+// An image for the Markdown preview: image() loads only files inside the app folder, so it is
+// copied there (here: when newer; another machine: the cached chunked copy). Returns { rel, w, h }.
+export async function stageImage(src, on) {
+  const n = await sizeOf(src, on).catch(() => { throw new Error("not found"); });
+  if (n > MAX_IMAGE) throw new Error(`larger than ${mb(MAX_IMAGE)}`);
+  let path;
+  if (on) path = await localCopy(src, on);
+  else {
+    path = `${appHome()}/${CACHE}/${hash(src)}-${src.slice(src.lastIndexOf("/") + 1)}`;
+    const r = await exec("sh", ["-c", 'mkdir -p "$(dirname "$2")" && { [ -e "$2" ] && [ ! "$1" -nt "$2" ] || cp -- "$1" "$2"; }', "media", src, path]);
+    if (r.code !== 0) throw new Error(r.stderr.trim() || "cannot copy");
+  }
+  return { rel: relToApp(path), ...(await dimensions(path)) };
+}
+
+// The first page of a PDF as an image, rendered here (macOS Quick Look, else pdftoppm).
+// Returns { rel, w, h, pages (0 when unknown), local (the PDF here, for Open) }.
+export async function pdfPreview(src, on, hooks) {
+  const local = await localCopy(src, on, hooks);
+  const dir = `${appHome()}/${CACHE}/pdf-${hash(`${on ?? ""}:${src}`)}`;
+  const mac = window()?.platform === "macos";
+  const render = mac
+    ? 'rm -rf "$2" && mkdir -p "$2" && qlmanage -t -s 1600 -o "$2" "$1" >/dev/null 2>&1 && mv "$2/${1##*/}.png" "$2/page-$3.png"'
+    : 'rm -rf "$2" && mkdir -p "$2" && { command -v pdftoppm >/dev/null || { echo "Install poppler-utils (pdftoppm) for PDF previews" >&2; exit 1; }; } && pdftoppm -png -r 110 -f 1 -l 1 -singlefile "$1" "$2/page-$3"';
+  const stamp = Date.now().toString(36), page = `${dir}/page-${stamp}.png`;
+  const r = await exec("sh", ["-c", render, "media", local, dir, stamp], { timeout: 60000 });
+  if (r.code !== 0) throw new Error(r.stderr.trim() || "Cannot render this PDF");
+  const count = await exec("sh", ["-c", 'LC_ALL=C grep -a -o "/Type */Page[^s]" "$1" | wc -l', "media", local]).catch(() => null);
+  return { rel: relToApp(page), ...(await dimensions(page)), pages: Number(count?.stdout.trim()) || 0, local };
+}
+
 export async function sweepCache() {
   await exec("find", [`${appHome()}/${CACHE}`, "-type", "f", "-mtime", "+1", "-delete"]).catch(() => null);
+  await exec("find", [`${appHome()}/${CACHE}`, "-mindepth", "1", "-type", "d", "-empty", "-delete"]).catch(() => null);
 }
 
 export const HTML = /\.(html?|xhtml)$/i;

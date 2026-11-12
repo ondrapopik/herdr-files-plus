@@ -10,7 +10,8 @@ Changes to `files` (now `files-plus`):
 - video opens in the system player or ffplay; HTML opens in the browser
 - files on another machine are copied in chunks, with a transfer progress bar
 - Download (to ~/Downloads) and upload by dropping files from Finder
-- Markdown files open as a rendered preview with a Source / Preview toggle
+- Markdown files open as a rendered preview with a Source / Preview toggle, with their local images
+- PDF files show their first page, with Open for the whole document
 - right-click menu: rename, new file, new folder, move to the Trash
 - text files are editable and saved, also on another machine
 

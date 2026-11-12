@@ -35,7 +35,12 @@ UI font at 13px.
      with an `Unsaved changes` row (`Save` / `Discard` / `Cancel`) when leaving with edits, and a
      status row (`Saved`, or the error in `t.ansi1` with `Reload from disk`).
    - **A Markdown file**: the rendered document, scrollable, 16px side and 12px vertical padding,
-     selectable text.
+     selectable text. Local images sit between the text blocks at their size, never wider than the
+     pane (unknown size: a 480×240 box they fit in); while copying `🖼 alt …` in `t.dim`, on error
+     `🖼 alt: not found` in `t.ansi1`.
+   - **A PDF**: its first page as an image at the pane's width, under it `Page 1 of 3 · Open shows
+     every page in your PDF app` in 11px `t.dim`; `Open` in the header. While it loads:
+     `Copying from <machine>… 45 %` or `Rendering the first page…`.
 3. **Transfer bar** (while a file is copied between machines), `t.surface` with a top border:
    `↓` (download, open) or `↑` (upload), the file name, `+2 waiting` when more are queued,
    `42 % · 120 MB / 286 MB · 38 MB/s · 0:04 left` in 11px `t.dim` (or `Preparing…`,
@@ -70,6 +75,13 @@ A click on:
 - **Markdown** (`md markdown mdown mkd`) opens it in Preview. `Source` shows the editor; edits
   show in the preview before saving. Links: `http(s):` and `mailto:` open with `open`; relative
   links resolve from the file's folder and open that file in the panel (images in the dialog).
+  Images: `![alt](path "title")`, `[![alt](path)](link)` and `<img src="path">` with a local path
+  (relative to the file, or absolute) are copied into the app folder one after another (up to 40
+  per file, 25 MB each) and drawn in place; a click opens one in the image dialog. Web images
+  (`http(s):`, `data:`) become their alt text. Lines inside ``` / ~~~ fences are left alone.
+- **a PDF** renders its first page here: copied first from another machine (with progress), then
+  `qlmanage -t -s 1600` on macOS or `pdftoppm -png -r 110 -f 1 -l 1` elsewhere. The page count is
+  a best guess (`/Type /Page` objects); `Open` hands the local copy to `open` / `xdg-open`.
 - **anything else** opens it as text. A file with a NUL byte says `Binary file · no text preview`.
 
 Files on another machine are copied to `data/files-plus-media/<hash>-<name>` before playing or
@@ -113,14 +125,15 @@ file, New folder (inside a folder, or beside a file), Move to Trash (`/usr/bin/t
   `Editor`, `EditorState`, `InputState`, `Input`, `TextView.markdown(id, text)`.
 - `mods/files-plus/media.js`: `pull` (the chunked copy here), `localCopy` (cached copies for
   playing), `download` (to `~/Downloads`), `upload` (chunks piped into `hc exec -i`),
-  `openVideo`, `openInBrowser`, `Player` (the audio bar), `newDownload` / `downloadView` (the
+  `stageImage` (a Markdown image into the app folder, with its pixel size), `pdfPreview` (the
+  first page), `openVideo`, `openInBrowser`, `Player` (the audio bar), `newDownload` / `downloadView` (the
   transfer bar), `sweepCache`. The queue (`enqueue`, `next`) and `drop` live in `main.js`;
   drops arrive through `.on_drop(e => e.paths)` on the tree and on each row.
 - `mods/image-viewer-plus/main.js`: clone of the shipped `image-viewer`. Stages the image into the
   app folder (`image()` only loads paths there), reads its pixel size with `sips` (macOS) or
   `file` (Linux) or `System.Drawing` (Windows), deletes the copy on close.
 - Programs: `sh`, `git`, `stat`, `hc exec --on <machine> -- dd`, `dd … | hc exec --on <machine>
-  -i -- sh -c 'cat >> …'`, `cp`, `open`, `ffplay`, `ffprobe`,
+  -i -- sh -c 'cat >> …'`, `cp`, `open` / `xdg-open`, `qlmanage` / `pdftoppm`, `sips` / `file`, `ffplay`, `ffprobe`,
   `kill`, `find`, `trash` / `gio` / `trash-put`, `sips` / `file`.
 - Icons: `chevron-down.svg`, `chevron-right.svg`, `file.svg`, `folder.svg` (14px / 12px, `svg()`).
 - The layout: the `files` block of a cloned `main` layout points at `files-plus`.
@@ -151,7 +164,13 @@ file, New folder (inside a folder, or beside a file), Move to Trash (`/usr/bin/t
 - Herdr has no audio or video element: playback is a separate `ffplay` / player process; kill it
   when the panel closes (`close()`).
 - `ffplay` and `ffprobe` are looked up on `PATH`, then `/opt/homebrew/bin` and `/usr/local/bin`.
-- Markdown images with relative paths don't render from another machine (the file isn't here).
+- `TextView.markdown` draws no images at all, not even from the app folder: split the Markdown
+  into text blocks and images (`mdParts`) and draw each image with `image()`.
+- `image()` loads only paths inside the app folder: stage Markdown images and the PDF page under
+  `data/files-plus-media/`. Give each PDF render a new file name, or `image()` may show an older
+  render of the same path.
+- Quick Look writes `<name>.pdf.png` into the output folder; `qlmanage` can hang, so its `exec`
+  has a 60 s timeout.
 - Watching the folder works only on this computer; another machine relies on the 10 s refresh.
 
 ## Done when
@@ -168,6 +187,9 @@ file, New folder (inside a folder, or beside a file), Move to Trash (`/usr/bin/t
   folder's images.
 - An mp3 plays from the bar; `❚❚`, `−10s`, `+10s` and a click on the bar work.
 - A `README.md` opens rendered; `Source` shows the editor; an edit shows in `Preview`; ⌘S saves.
+- A Markdown file with `![x](img/a.png)` shows the picture at the pane's width, also on another
+  machine; a missing one says `🖼 x: not found`; a web badge shows as its alt text.
+- A two-page PDF shows page 1 and `Page 1 of 2`; `Open` opens it in the PDF app.
 - A relative link in the Markdown opens the linked file in the panel.
 - Right-click → Rename, New file, New folder and Move to Trash work, here and on another machine.
 - Saving a file that changed on disk since it was opened is refused with `Reload from disk`.
