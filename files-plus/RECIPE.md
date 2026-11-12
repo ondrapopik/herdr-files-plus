@@ -89,7 +89,7 @@ the path (`~/Downloads/…`).
 
 **Drop** files from Finder: on the empty tree they go into the root, on a folder row into that
 folder (it opens), on a file row beside it. Here they are copied with `cp -R` (folders too); on
-another machine each file goes over in 7 MiB chunks into `<name>.part` and is renamed when the
+another machine each file goes over in 7 MiB chunks (6 at once) into `<name>.part` and is renamed when the
 size matches; folders are refused (`Folders can't be uploaded to another machine yet`). An
 existing name is never overwritten (`<name> already exists`). The folder reloads afterwards.
 
@@ -129,8 +129,14 @@ file, New folder (inside a folder, or beside a file), Move to Trash (`/usr/bin/t
 
 - `hc exec` keeps only the **first 8 MB** of a program's stdout and still exits 0 (it prints
   `output cut` on stderr). A plain `hc exec -- cat file > copy` silently truncates. Copy in chunks
-  below that (`dd bs=1048576 skip=… count=7`), append, and compare the final size with `wc -c` on
-  the other machine.
+  below that (`dd bs=1048576 skip=… count=7`), write each at its offset (`dd seek=… conv=notrunc`),
+  and compare the final size with `wc -c` on the other machine.
+- Each `hc exec` costs ~0.3 s by itself, so one chunk after another is slow (100 MB in 5.2 s on a
+  LAN). Six chunks in flight at once (`PARALLEL` in `media.js`) did it in 2.1 s, close to plain
+  `ssh`.
+- Never pipe `hc exec … | dd …`: the pipe's exit code is the last `dd`'s, so a failed chunk leaves
+  a hole of zeros that a size check doesn't see. Each chunk goes to its own temp file, is checked
+  for its expected byte count, then written in place (on the other machine too, for uploads).
 - Piped stdin (`hc exec -i`) is capped at 8 MB too, but refused cleanly (`at most 8 MB piped in`,
   exit 6): upload in chunks below it as well.
 - A drop on a row may also reach the tree: rows call `cx.stop_propagation()` and `drop` ignores

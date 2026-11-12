@@ -20,13 +20,13 @@ See [files-plus/RECIPE.md](files-plus/RECIPE.md) for how it is built.
 - **HTML**: opens in the default browser; right-click → Edit for the source.
 - **Markdown**: a rendered preview, with a **Source / Preview** toggle; relative links open that
   file in the panel, web links in the browser.
-- **Another machine**: media are copied here first in 7 MiB chunks (`hc exec` keeps only the first
+- **Another machine**: media are copied here first in 7 MiB chunks, 6 at once (`hc exec` keeps only the first
   8 MB of a program's output), with a download bar showing %, MB, speed and time left, and ✕ to
   cancel. Copies live in `data/files-plus-media/` and are swept after a day.
 - **Download**: right-click a file of another machine → Download saves it to `~/Downloads`
   (`name (1).ext` when the name is taken).
 - **Upload**: drop files from Finder on the panel (the root), on a folder (into it) or on a file
-  (beside it). On another machine they go over in 7 MiB chunks; here they are copied (folders
+  (beside it). On another machine they go over in 7 MiB chunks, 6 at once; here they are copied (folders
   too). Nothing is overwritten. Transfers run one at a time, the bar shows `↓` / `↑` and how many
   wait.
 - **Right-click** a file or folder (or the empty area, or **+**): Download, Rename, New file, New folder,
