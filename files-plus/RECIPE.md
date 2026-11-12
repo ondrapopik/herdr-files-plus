@@ -4,7 +4,7 @@ The Files panel on the right of the window, extended so that every kind of file 
 useful on a click, here or on another machine: images open in a viewer dialog, audio plays in a
 bar at the bottom of the panel, videos and HTML open in their apps after a download with a progress
 bar, Markdown shows rendered, and other text files open in an editor you can save from. A
-right-click renames, creates and moves to the Trash.
+right-click downloads, renames, creates and moves to the Trash; files dropped from Finder upload.
 
 ![Files+](preview.png)
 
@@ -25,7 +25,8 @@ UI font at 13px.
    - **The tree**: rows 28px, 8px left padding plus 18px per level, a 12px chevron (folders), a
      14px folder or file icon in `t.muted`, the name (truncated), and a git mark on the right
      (`A` in `t.ansi2`, `D` / `U` in `t.ansi1`, `M` in `t.blocked`). The right-clicked row is
-     `t.selected`. Under it, a **menu row** of 22px buttons: `Edit` (HTML only), `Rename`,
+     `t.selected`. Under it, a **menu row** of 22px buttons: `Download` (files, another machine
+     only), `Edit` (HTML only), `Rename`,
      `New file`, `New folder`, `Move to Trash` (danger, `t.ansi1`), `✕`. A Trash confirmation row
      reads `Move "name" to the Trash?` with `Move` and `Cancel`. Rename and create put an inline
      input (24px, `t.accent` border) in place of / under the row. At the end, `Loading files…`,
@@ -35,9 +36,10 @@ UI font at 13px.
      status row (`Saved`, or the error in `t.ansi1` with `Reload from disk`).
    - **A Markdown file**: the rendered document, scrollable, 16px side and 12px vertical padding,
      selectable text.
-3. **Download bar** (while a file is copied from another machine), `t.surface` with a top border:
-   `↓`, the file name, `42 % · 120 MB / 286 MB · 38 MB/s · 0:04 left` in 11px `t.dim` (or
-   `Preparing…`), a `✕` button, and under it a 6px `t.border` track with a `t.accent` fill.
+3. **Transfer bar** (while a file is copied between machines), `t.surface` with a top border:
+   `↓` (download, open) or `↑` (upload), the file name, `+2 waiting` when more are queued,
+   `42 % · 120 MB / 286 MB · 38 MB/s · 0:04 left` in 11px `t.dim` (or `Preparing…`,
+   `Cancelling…`), a `✕` button, and under it a 6px `t.border` track with a `t.accent` fill.
 4. **Audio bar** (while a track is loaded), same style: `▶` / `❚❚` (primary), `−10s`, `+10s`, the
    track name, `1:23 / 4:56` (or `Copying 45 % of 12 MB`), `✕`, and a 6px progress bar: `t.dim`
    fill while copying, `t.accent` while playing.
@@ -74,7 +76,22 @@ Files on another machine are copied to `data/files-plus-media/<hash>-<name>` bef
 opening (up to 4 GB; images up to 64 MB to `data/image-viewer-plus/`). A copy with the right size
 is reused. During the copy the download bar (or the audio bar) shows progress; `✕` cancels after
 the chunk in flight and deletes the partial file. Opening another video or HTML file cancels the
-running download. Copies older than a day are deleted when the panel starts.
+running open (not downloads or uploads). Copies older than a day are deleted when the panel
+starts.
+
+Transfers (opening a remote video or HTML file, Download, uploads) run one at a time from a queue.
+`✕` cancels the running one after its chunk in flight, deletes its `.part`, and the next starts.
+A failure shows an error notification `Download failed` / `Upload failed` with the reason.
+
+**Download** (right-click a file when the space or terminal is on another machine) saves it to
+`~/Downloads/<name>`, or `<name> (1).<ext>`, `(2)`… when taken, then notifies `Downloaded` with
+the path (`~/Downloads/…`).
+
+**Drop** files from Finder: on the empty tree they go into the root, on a folder row into that
+folder (it opens), on a file row beside it. Here they are copied with `cp -R` (folders too); on
+another machine each file goes over in 7 MiB chunks into `<name>.part` and is renamed when the
+size matches; folders are refused (`Folders can't be uploaded to another machine yet`). An
+existing name is never overwritten (`<name> already exists`). The folder reloads afterwards.
 
 Editing: the editor is writable only when the whole file was read (≤ 1 MiB, ≤ 400,000 chars).
 ⌘S / Ctrl+S or `Save` writes it. Here through `writeTextFile` (refuses a stale file); on another
@@ -94,12 +111,16 @@ file, New folder (inside a folder, or beside a file), Move to Trash (`/usr/bin/t
   `watchFolder`, `theme()`, `settings()`, `window()`, `openOverlay({ mod: "image-viewer-plus",
   kind: "dialog", width: 920, height: 0.85, props: { file, fileOn, files } })`. From `gpui-base`:
   `Editor`, `EditorState`, `InputState`, `Input`, `TextView.markdown(id, text)`.
-- `mods/files-plus/media.js`: `localCopy` (the chunked copy), `openVideo`, `openInBrowser`,
-  `Player` (the audio bar), `newDownload` / `downloadView` (the download bar), `sweepCache`.
+- `mods/files-plus/media.js`: `pull` (the chunked copy here), `localCopy` (cached copies for
+  playing), `download` (to `~/Downloads`), `upload` (chunks piped into `hc exec -i`),
+  `openVideo`, `openInBrowser`, `Player` (the audio bar), `newDownload` / `downloadView` (the
+  transfer bar), `sweepCache`. The queue (`enqueue`, `next`) and `drop` live in `main.js`;
+  drops arrive through `.on_drop(e => e.paths)` on the tree and on each row.
 - `mods/image-viewer-plus/main.js`: clone of the shipped `image-viewer`. Stages the image into the
   app folder (`image()` only loads paths there), reads its pixel size with `sips` (macOS) or
   `file` (Linux) or `System.Drawing` (Windows), deletes the copy on close.
-- Programs: `sh`, `git`, `stat`, `hc exec --on <machine> -- dd`, `open`, `ffplay`, `ffprobe`,
+- Programs: `sh`, `git`, `stat`, `hc exec --on <machine> -- dd`, `dd … | hc exec --on <machine>
+  -i -- sh -c 'cat >> …'`, `cp`, `open`, `ffplay`, `ffprobe`,
   `kill`, `find`, `trash` / `gio` / `trash-put`, `sips` / `file`.
 - Icons: `chevron-down.svg`, `chevron-right.svg`, `file.svg`, `folder.svg` (14px / 12px, `svg()`).
 - The layout: the `files` block of a cloned `main` layout points at `files-plus`.
@@ -110,6 +131,10 @@ file, New folder (inside a folder, or beside a file), Move to Trash (`/usr/bin/t
   `output cut` on stderr). A plain `hc exec -- cat file > copy` silently truncates. Copy in chunks
   below that (`dd bs=1048576 skip=… count=7`), append, and compare the final size with `wc -c` on
   the other machine.
+- Piped stdin (`hc exec -i`) is capped at 8 MB too, but refused cleanly (`at most 8 MB piped in`,
+  exit 6): upload in chunks below it as well.
+- A drop on a row may also reach the tree: rows call `cx.stop_propagation()` and `drop` ignores
+  the same paths again within a second.
 - `exec` times out after 30 s by default. Give every chunk its own `exec` with a longer timeout
   (here 150 s; `hc exec --timeout 120`) instead of one long copy.
 - `ExecResult.stdout` is text: binary data must go to a file inside the shell command, never
@@ -128,7 +153,11 @@ file, New folder (inside a folder, or beside a file), Move to Trash (`/usr/bin/t
 - `herdr-app check` passes for `mods/files-plus` and `mods/image-viewer-plus`.
 - A file larger than 8 MB on another machine (a video) downloads with the bar moving through %,
   MB and speed, ends with the same SHA-1 as the original, and opens in the player.
-- `✕` on the download bar stops it and leaves no `.part` file in `data/files-plus-media/`.
+- `✕` on the transfer bar stops it and leaves no `.part` file in `data/files-plus-media/`.
+- Right-click → Download on a remote file saves it to `~/Downloads` with the same SHA-1; a second
+  Download of it saves `name (1).ext`.
+- A 20 MB file dropped on a folder of another machine arrives with the same SHA-1; dropping it
+  again fails with `already exists`; two files dropped together show `+1 waiting`.
 - An image on another machine opens in the dialog with its pixel size; ← / → step through the
   folder's images.
 - An mp3 plays from the bar; `❚❚`, `−10s`, `+10s` and a click on the bar work.

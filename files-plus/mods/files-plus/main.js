@@ -3,11 +3,12 @@
 // files-plus: right-click a file or folder (or the empty area, or "+") to rename, create, or move to the Trash.
 // files-plus: audio plays in a bar at the bottom (media.js); video opens in the system player.
 // files-plus: copies from another machine show a progress bar at the bottom; Markdown opens as a rendered preview.
+// files-plus: right-click → Download saves a file of another machine to ~/Downloads; files dropped on the panel are uploaded.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, InputState, Input, TextView } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, openOverlay } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, openOverlay, notify, home } from "herdr";
 import { Buffer } from "buffer";
-import { Player, AUDIO, VIDEO, HTML, openVideo, openInBrowser, sweepCache, newDownload, downloadView } from "./media.js";
+import { Player, AUDIO, VIDEO, HTML, openVideo, openInBrowser, sweepCache, newDownload, downloadView, download, upload } from "./media.js";
 
 const IMAGE = /\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?)$/i;
 const MARKDOWN = /\.(md|markdown|mdown|mkd)$/i;
@@ -74,9 +75,10 @@ export default class Files extends View {
     this.saved = new Map();
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
     this.player = new Player();
+    this.transfer = null; this.queue = [];
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
-    cx.timer.every(1000, cx => { this.player.tick(cx); if (this.download) cx.notify(); }); // only does work while a track plays or a copy runs
+    cx.timer.every(1000, cx => { this.player.tick(cx); if (this.transfer) cx.notify(); }); // only does work while a track plays or a copy runs
     cx.spawn(async () => { await sweepCache(); });
   }
 
@@ -334,6 +336,7 @@ export default class Files extends View {
   menuRow(path, dir, depth, t) {
     const b = (key, label, fn, tone) => this.button(`fm-${key}-${path}`, label, fn, t, tone);
     return h_flex().id(`fm-${path}`).flex_none().flex_wrap().gap(5).py(4).pl(8 + depth * 18 + 19).pr(8)
+      .when(!dir && Boolean(this.on), el => el.child(b("download", "Download", cx => { this.menu = null; this.downloadFile(path, cx); })))
       .when(!dir && HTML.test(path), el => el.child(b("edit", "Edit", cx => { this.menu = null; this.show(path, cx); cx.notify(); })))
       .when(path !== "", el => el.child(b("rename", "Rename", cx => this.startEdit("rename", path, dir, cx))))
       .child(b("file", "New file", cx => this.startEdit("file", path, dir, cx)))
@@ -376,6 +379,7 @@ export default class Files extends View {
         .when(picked, el => el.bg(t.selected))
         .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.openMenu(path, entry.dir, cx); })
         .on_click((_e, cx) => this.open(path, entry, cx))
+        .on_drop((e, cx) => { cx.stop_propagation(); this.drop(e.paths, entry.dir ? path : prefix, cx); })
         .child(entry.dir ? svg(`mods/files-plus/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
         .child(svg(`mods/files-plus/${entry.dir ? "folder" : "file"}.svg`).size(14).flex_none().text_color(t.muted))
         .child(div().flex_1().min_w(0).truncate().child(entry.name))
@@ -403,6 +407,7 @@ export default class Files extends View {
         .when(!this.file && Boolean(this.root), el => el.child(div().id("files-new").w(20).flex_none().text_center().cursor_pointer().text_color(t.muted).hover(s => s.text_color(t.foreground))
           .on_click((_e, cx) => this.menu?.path === "" ? this.closeEditing(cx) : this.openMenu("", true, cx)).child("+"))))
       .when(!this.file, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6)
+        .on_drop((e, cx) => this.drop(e.paths, "", cx))
         .on_mouse_down("right", (_e, cx) => this.openMenu("", true, cx))
         .when(this.menu?.path === "", el => el.child(this.menuRow("", true, -1, t)))
         .when(Boolean(this.opError), el => el.child(h_flex().id("files-op-error").flex_none().gap(6).p(8).items_start().text_size(12).text_color(t.ansi1)
@@ -430,7 +435,7 @@ export default class Files extends View {
           })
           .child(Editor.new(this.code).flex_1().min_h(0))
         : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")))
-      .when(Boolean(this.download), el => el.child(downloadView(this.download, t, (...a) => this.button(...a), cx => { this.download.cancelled = true; this.download = null; cx.notify(); })))
+      .when(Boolean(this.transfer), el => el.child(downloadView(this.transfer, t, (...a) => this.button(...a), cx => { this.transfer.cancelled = true; cx.notify(); }, this.queue.length)))
       .when(this.player.active, el => el.child(this.player.view(t, (...a) => this.button(...a))));
   }
 
@@ -444,20 +449,64 @@ export default class Files extends View {
     this.show(path, cx);
   }
 
-  // Runs openVideo / openInBrowser; a file on another machine is copied first, shown in the download bar.
-  // A new download replaces (cancels) the previous one.
+  // Runs openVideo / openInBrowser; a file on another machine is copied first, shown in the transfer bar.
+  // Opening another one cancels the previous open (downloads and uploads stay queued).
   fetch(opener, path, cx) {
     const src = `${this.root}/${path}`, on = this.on ?? null;
     if (!on) { opener(src, null); return; }
-    if (this.download) this.download.cancelled = true;
-    const dl = this.download = newDownload(baseOf(path));
+    for (const job of [this.transfer, ...this.queue]) if (job?.kind === "open") job.cancelled = true;
+    this.queue = this.queue.filter(job => !job.cancelled);
+    this.enqueue({ ...newDownload(baseOf(path)), kind: "open", run: hooks => opener(src, on, hooks) }, cx);
+  }
+
+  // Saves a file of the space's machine to ~/Downloads.
+  downloadFile(path, cx) {
+    const src = `${this.root}/${path}`, on = this.on;
+    this.enqueue({ ...newDownload(baseOf(path)), kind: "download", run: async hooks => {
+      const dst = await download(src, on, hooks);
+      const shown = dst.startsWith(home() + "/") ? `~${dst.slice(home().length)}` : dst;
+      notify({ title: "Downloaded", body: shown, timeout: 5000 });
+    } }, cx);
+  }
+
+  // Files dropped from Finder: uploaded into `folder` (relative to the root, "" for the root), one after another.
+  drop(paths, folder, cx) {
+    const key = `${folder}\n${paths.join("\n")}`;
+    if (this.lastDrop?.key === key && Date.now() - this.lastDrop.at < 1000) return; // a row and the tree both got it
+    this.lastDrop = { key, at: Date.now() };
+    const root = this.root, on = this.on ?? null, context = this.context;
+    if (!root || !paths?.length) return;
+    if (folder && !this.folders.has(folder)) this.toggle(folder, cx);
+    for (const src of paths) {
+      const name = baseOf(src.replace(/\/+$/, ""));
+      const dst = `${root}/${folder ? `${folder}/` : ""}${name}`;
+      this.enqueue({ ...newDownload(name, true), kind: "upload", run: async hooks => {
+        await upload(src, on, dst, hooks);
+        if (this.current(context)) { await this.loadFolder(folder, context).catch(() => null); }
+      } }, cx);
+    }
+  }
+
+  // Transfers run one at a time; the bar shows the running one and how many wait.
+  enqueue(job, cx) {
+    this.queue.push(job);
+    if (!this.transfer) this.next(cx); else cx.notify();
+  }
+
+  next(cx) {
+    const job = this.transfer = this.queue.shift() ?? null;
     cx.notify();
+    if (!job) return;
+    job.startedAt = Date.now();
     cx.spawn(async cx => {
-      await opener(src, on, {
-        progress: (done, total) => { dl.done = done; dl.total = total; if (this.download === dl) cx.notify(); },
-        cancelled: () => dl.cancelled,
-      });
-      if (this.download === dl) { this.download = null; cx.notify(); }
+      try {
+        await job.run({
+          progress: (done, total) => { job.done = done; job.total = total; if (this.transfer === job) cx.notify(); },
+          cancelled: () => job.cancelled,
+        });
+      } catch (e) {
+        if (!e?.cancelled) notify({ title: job.up ? "Upload failed" : "Download failed", body: `${job.name}: ${String(e?.message ?? e)}`, level: "error" });
+      } finally { if (this.transfer === job) this.next(cx); }
     });
   }
 
@@ -478,7 +527,7 @@ export default class Files extends View {
   }
 
   async close(_cx) {
-    if (this.download) this.download.cancelled = true;
+    for (const job of [this.transfer, ...this.queue]) if (job) job.cancelled = true;
     const pid = this.player?.track?.pid;
     if (pid) await exec("kill", [String(pid)]).catch(() => null);
   }

@@ -8,7 +8,8 @@ Changes to `files` (now `files-plus`):
 - images open in the `image-viewer-plus` dialog, with the folder's other images
 - audio plays in a bar at the bottom of the panel (media.js, ffplay)
 - video opens in the system player or ffplay; HTML opens in the browser
-- files on another machine are copied in chunks, with a download progress bar
+- files on another machine are copied in chunks, with a transfer progress bar
+- Download (to ~/Downloads) and upload by dropping files from Finder
 - Markdown files open as a rendered preview with a Source / Preview toggle
 - right-click menu: rename, new file, new folder, move to the Trash
 - text files are editable and saved, also on another machine

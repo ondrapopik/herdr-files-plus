@@ -18,39 +18,91 @@ const clock = s => { s = Math.max(0, Math.floor(s || 0)); const m = Math.floor(s
   return h ? `${h}:${String(m % 60).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}` : `${m}:${String(s % 60).padStart(2, "0")}`; };
 const mb = n => `${(n / 1048576).toFixed(n < 10485760 ? 1 : 0)} MB`;
 
-// A local path for `src`: itself here, or a cached copy of the file on machine `on`.
+const HC = 'H=$(command -v hc || echo "$HOME/.local/bin/hc"); ';
+const cancelled = () => Object.assign(new Error("Transfer cancelled"), { cancelled: true });
+const chunksOf = n => Math.max(1, Math.ceil(n / (CHUNK_MIB * 1048576)));
+const doneAfter = (i, n) => Math.min(n, (i + 1) * CHUNK_MIB * 1048576);
+
+// The size in bytes of `path`, here or on machine `on`.
+async function sizeOf(path, on) {
+  const r = await exec("sh", ["-c", 'wc -c < "$1"', "media", path], on ? { on } : undefined);
+  if (r.code !== 0) throw new Error(r.stderr.trim() || "Cannot read this file");
+  return Number(r.stdout.trim());
+}
+
+// `hc exec` keeps only the first 8 MB of stdout and of piped stdin (stdout is cut silently, with exit 0),
+// so files go both ways in 7 MiB chunks through `dd`, into `<dst>.part`, renamed once the size matches.
 // hooks: progress(doneBytes, totalBytes) after each chunk, cancelled() checked between chunks.
-async function localCopy(src, on, hooks = {}) {
-  if (!on) return src;
-  const size = await exec("sh", ["-c", 'wc -c < "$1"', "media", src], { on });
-  if (size.code !== 0) throw new Error(size.stderr.trim() || "Cannot read this file");
-  const n = Number(size.stdout.trim());
-  if (n > MAX_BYTES) throw new Error(`Too large to copy here (${mb(n)})`);
-  const name = src.slice(src.lastIndexOf("/") + 1);
-  const dst = `${appHome()}/${CACHE}/${hash(`${on}:${src}`)}-${name}`;
-  const cached = await exec("sh", ["-c", '[ -f "$1" ] && [ "$(wc -c < "$1")" -eq "$2" ]', "media", dst, String(n)]);
-  if (cached.code === 0) return dst;
+
+// Copies `src` of `n` bytes on machine `on` to the local `dst`.
+async function pull(src, on, dst, n, hooks = {}) {
   hooks.progress?.(0, n);
-  // `hc exec` keeps only the first 8 MB of stdout (and still exits 0), so the file comes over in chunks below that.
   const start = await exec("sh", ["-c", 'mkdir -p "$(dirname "$1")" && : > "$1.part"', "media", dst]);
   if (start.code !== 0) throw new Error(start.stderr.trim() || "Cannot write the local copy");
-  const chunk = 'H=$(command -v hc || echo "$HOME/.local/bin/hc"); '
-    + '"$H" exec --on "$1" --timeout 120 -- dd if="$2" bs=1048576 skip="$3" count="$4" 2>/dev/null >> "$5.part"';
-  const chunks = Math.max(1, Math.ceil(n / (CHUNK_MIB * 1048576)));
-  for (let i = 0; i < chunks; i++) {
-    if (hooks.cancelled?.()) {
-      await exec("rm", ["-f", `${dst}.part`]).catch(() => null);
-      throw Object.assign(new Error("Download cancelled"), { cancelled: true });
-    }
+  const chunk = HC + '"$H" exec --on "$1" --timeout 120 -- dd if="$2" bs=1048576 skip="$3" count="$4" 2>/dev/null >> "$5.part"';
+  for (let i = 0, k = chunksOf(n); i < k; i++) {
+    if (hooks.cancelled?.()) { await exec("rm", ["-f", `${dst}.part`]).catch(() => null); throw cancelled(); }
     const r = await exec("sh", ["-c", chunk, "media", on, src, String(i * CHUNK_MIB), String(CHUNK_MIB), dst], { timeout: 150000 });
     if (r.code !== 0) {
       await exec("rm", ["-f", `${dst}.part`]).catch(() => null);
       throw new Error(r.stderr.trim() || `Cannot copy this file from ${on}`);
     }
-    hooks.progress?.(Math.min(n, (i + 1) * CHUNK_MIB * 1048576), n);
+    hooks.progress?.(doneAfter(i, n), n);
   }
   const done = await exec("sh", ["-c", '[ "$(wc -c < "$1.part")" -eq "$2" ] && mv "$1.part" "$1" || { rm -f "$1.part"; exit 1; }', "media", dst, String(n)]);
   if (done.code !== 0) throw new Error(`Copy from ${on} came out incomplete`);
+}
+
+// A local path for `src`: itself here, or a cached copy of the file on machine `on`.
+async function localCopy(src, on, hooks = {}) {
+  if (!on) return src;
+  const n = await sizeOf(src, on);
+  if (n > MAX_BYTES) throw new Error(`Too large to copy here (${mb(n)})`);
+  const name = src.slice(src.lastIndexOf("/") + 1);
+  const dst = `${appHome()}/${CACHE}/${hash(`${on}:${src}`)}-${name}`;
+  const cached = await exec("sh", ["-c", '[ -f "$1" ] && [ "$(wc -c < "$1")" -eq "$2" ]', "media", dst, String(n)]);
+  if (cached.code === 0) return dst;
+  await pull(src, on, dst, n, hooks);
+  return dst;
+}
+
+// Saves `src` from machine `on` into ~/Downloads, as "name (1).ext" when the name is taken. Returns the path.
+export async function download(src, on, hooks = {}) {
+  const n = await sizeOf(src, on);
+  const name = src.slice(src.lastIndexOf("/") + 1);
+  const pick = await exec("sh", ["-c", 'd="$HOME/Downloads"; b=$1; f="$d/$b"; i=1; '
+    + 'while [ -e "$f" ] || [ -e "$f.part" ]; do case "$b" in ?*.*) f="$d/${b%.*} ($i).${b##*.}";; *) f="$d/$b ($i)";; esac; i=$((i+1)); done; '
+    + 'mkdir -p "$d" && echo "$f"', "media", name]);
+  if (pick.code !== 0) throw new Error(pick.stderr.trim() || "Cannot write to ~/Downloads");
+  const dst = pick.stdout.trim();
+  await pull(src, on, dst, n, hooks);
+  return dst;
+}
+
+// Copies the local file `src` to `dst` on machine `on` (or here when `on` is null). Never overwrites.
+export async function upload(src, on, dst, hooks = {}) {
+  const dir = await exec("sh", ["-c", '[ -d "$1" ]', "media", src]);
+  if (dir.code === 0 && on) throw new Error("Folders can't be uploaded to another machine yet");
+  if (!on) {
+    hooks.progress?.(0, 0);
+    const r = await exec("sh", ["-c", '[ -e "$2" ] && { echo "${2##*/} already exists" >&2; exit 1; }; cp -R -- "$1" "$2"', "media", src, dst], { timeout: 600000 });
+    if (r.code !== 0) throw new Error(r.stderr.trim() || "Cannot copy this file");
+    return dst;
+  }
+  const n = await sizeOf(src, null);
+  const start = await exec("sh", ["-c", '[ -e "$1" ] && { echo "${1##*/} already exists" >&2; exit 1; }; : > "$1.part"', "media", dst], { on });
+  if (start.code !== 0) throw new Error(start.stderr.trim() || `Cannot write on ${on}`);
+  const drop = () => exec("sh", ["-c", 'rm -f "$1.part"', "media", dst], { on }).catch(() => null);
+  hooks.progress?.(0, n);
+  const chunk = HC + 'dd if="$2" bs=1048576 skip="$3" count="$4" 2>/dev/null | "$H" exec --on "$1" -i --timeout 120 -- sh -c \'cat >> "$1.part"\' upload "$5"';
+  for (let i = 0, k = chunksOf(n); i < k; i++) {
+    if (hooks.cancelled?.()) { await drop(); throw cancelled(); }
+    const r = await exec("sh", ["-c", chunk, "media", on, src, String(i * CHUNK_MIB), String(CHUNK_MIB), dst], { timeout: 150000 });
+    if (r.code !== 0) { await drop(); throw new Error((r.stderr || r.stdout).trim() || `Cannot copy this file to ${on}`); }
+    hooks.progress?.(doneAfter(i, n), n);
+  }
+  const done = await exec("sh", ["-c", '[ "$(wc -c < "$1.part")" -eq "$2" ] && [ ! -e "$1" ] && mv "$1.part" "$1" || { rm -f "$1.part"; exit 1; }', "media", dst, String(n)], { on });
+  if (done.code !== 0) throw new Error(`Copy to ${on} came out incomplete`);
   return dst;
 }
 
@@ -81,21 +133,23 @@ export async function openVideo(src, on, hooks) {
   } catch (e) { if (!e?.cancelled) notify({ title: "Cannot play video", body: String(e?.message ?? e), level: "error" }); }
 }
 
-// A file being copied here from another machine: { name, done, total, startedAt, cancelled }.
-export function newDownload(name) {
-  return { name, done: 0, total: 0, startedAt: Date.now(), cancelled: false };
+// A file being copied between machines: { name, up, done, total, startedAt, cancelled }.
+export function newDownload(name, up = false) {
+  return { name, up, done: 0, total: 0, startedAt: Date.now(), cancelled: false };
 }
 
 // The download bar at the bottom of the Files panel: name, bytes, speed, a bar and a cancel button.
-export function downloadView(dl, t, button, onCancel) {
+// `more`: transfers waiting behind this one.
+export function downloadView(dl, t, button, onCancel, more = 0) {
   const frac = dl.total ? Math.min(1, dl.done / dl.total) : 0;
   const secs = (Date.now() - dl.startedAt) / 1000, rate = secs > 0.5 ? dl.done / secs : 0;
   const eta = rate && dl.total > dl.done ? ` · ${clock((dl.total - dl.done) / rate)} left` : "";
-  const text = dl.total ? `${Math.round(frac * 100)} % · ${mb(dl.done)} / ${mb(dl.total)}${rate ? ` · ${mb(rate)}/s` : ""}${eta}` : "Preparing…";
+  const text = dl.cancelled ? "Cancelling…" : dl.total ? `${Math.round(frac * 100)} % · ${mb(dl.done)} / ${mb(dl.total)}${rate ? ` · ${mb(rate)}/s` : ""}${eta}` : "Preparing…";
   return v_flex().id("download-bar").flex_none().gap(6).px(12).py(8).border_t(1).border_color(t.border).bg(t.surface)
     .child(h_flex().gap(6).items_center()
-      .child(div().flex_none().text_size(12).text_color(t.dim).child("↓"))
+      .child(div().flex_none().text_size(12).text_color(t.dim).child(dl.up ? "↑" : "↓"))
       .child(div().flex_1().min_w(0).truncate().text_size(12).child(dl.name))
+      .when(more > 0, el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(`+${more} waiting`)))
       .child(div().flex_none().text_size(11).text_color(t.dim).child(text))
       .child(button("download-cancel", "✕", onCancel, t)))
     .child(div().id("download-progress").h(6).w_full().rounded(3).bg(t.border)
