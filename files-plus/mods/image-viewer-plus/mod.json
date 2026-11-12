@@ -1,0 +1,13 @@
+{
+  "place": "none",
+  "title": "Image Viewer",
+  "overlay": {
+    "kind": "dialog",
+    "width": 920,
+    "height": 0.85
+  },
+  "cloned_from": {
+    "name": "image-viewer",
+    "version": "0.1.13"
+  }
+}

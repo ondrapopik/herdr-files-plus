@@ -1,0 +1,19 @@
+herdr-files-plus
+Copyright 2026 Ondra Popelář
+
+This product contains modified versions of the `files` and `image-viewer` mods
+shipped with the Herdr app 0.1.13, licensed under the Apache License 2.0.
+
+Changes to `files` (now `files-plus`):
+- images open in the `image-viewer-plus` dialog, with the folder's other images
+- audio plays in a bar at the bottom of the panel (media.js, ffplay)
+- video opens in the system player or ffplay; HTML opens in the browser
+- files on another machine are copied in chunks, with a download progress bar
+- Markdown files open as a rendered preview with a Source / Preview toggle
+- right-click menu: rename, new file, new folder, move to the Trash
+- text files are editable and saved, also on another machine
+
+Changes to `image-viewer` (now `image-viewer-plus`):
+- images on another machine, copied in chunks
+- pixel size on macOS (sips) and Linux (file), so 100 % and zoom work there
+- the `files` prop: step through a folder's images with ← and →
