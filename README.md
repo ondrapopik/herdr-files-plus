@@ -22,6 +22,9 @@ See [files-plus/RECIPE.md](files-plus/RECIPE.md) for how it is built.
   file in the panel, web links in the browser. Local images (`![alt](img/x.png)`, `<img src>`)
   show at the panel's width, also from another machine (up to 25 MB each, 40 per file); a click
   opens one in the viewer. Images from the web show as their alt text.
+- **Big window**: ⤢ in the panel's header opens the shown Markdown, diagram or PDF in a dialog over
+  the whole window (Esc or ✕ closes it), the text in a 900 px column at 15 px. Links open in it, ←
+  goes back; read-only (edit in the panel).
 - **Diagrams in Markdown**: ```` ```mermaid ```` and ```` ```bpmn ```` blocks (BPMN 2.0 XML with its
   diagram section) show as pictures, in the theme's light or dark style; a click opens one in the
   viewer to zoom. A broken block shows the error and its source. Files of their own (`.bpmn`,

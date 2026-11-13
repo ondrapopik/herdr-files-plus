@@ -7,7 +7,7 @@
 // files-plus: the Markdown preview shows its local images; a PDF shows its first page.
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, InputState, Input, TextView } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, openOverlay, notify, home } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, openOverlay, closeOverlay, props, notify, home } from "herdr";
 import { Buffer } from "buffer";
 import { Player, AUDIO, VIDEO, HTML, openVideo, openInBrowser, sweepCache, newDownload, downloadView, download, upload, stageImage, pdfPreview, renderDiagrams } from "./media.js";
 
@@ -16,6 +16,8 @@ const MARKDOWN = /\.(md|markdown|mdown|mkd)$/i;
 // A diagram file opens as its picture, like Markdown in Preview (Source shows the text).
 const DIAGRAM_FILE = /\.(bpmn|mmd|mermaid)$/i;
 const PREVIEWABLE = /\.(md|markdown|mdown|mkd|bpmn|mmd|mermaid)$/i;
+// The viewer window: the panel's preview on its own, in a big dialog (props { view, root, file, on }).
+const VIEW_WIDTH = 900; // the reading column at most, in px
 const PDF = /\.pdf$/i;
 // ![alt](src "title"), also wrapped in a link [![alt](src)](href), or <img src="…">
 const IMG = /\[?!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+["'][^"']*["'])?\s*\)(?:\]\([^)]*\))?|<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi;
@@ -131,6 +133,14 @@ export default class Files extends View {
     this.player = new Player();
     this.transfer = null; this.queue = [];
     this.mdImages = new Map(); this.diagrams = new Map(); this.pdf = null;
+    const p = props() ?? {};
+    if (p.view) {
+      // The viewer: one file, read-only, no tree; links open in it, ← goes back.
+      this.viewer = true; this.history = [];
+      this.root = p.root; this.on = p.on ?? null; this.context = { key: "viewer", cwd: p.root, on: this.on };
+      this.show(p.file, cx);
+      return;
+    }
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
     cx.timer.every(1000, cx => { this.player.tick(cx); if (this.transfer) cx.notify(); }); // only does work while a track plays or a copy runs
@@ -148,6 +158,7 @@ export default class Files extends View {
   }
 
   current(context) {
+    if (this.viewer) return this.context === context;
     return this.context === context && key() === context.key;
   }
 
@@ -238,7 +249,7 @@ export default class Files extends View {
         const t = theme(), ext = path.includes(".") ? path.split(".").pop() : "txt";
         const size = stamp?.code === 0 ? Number(stamp.stdout.trim().split(":")[1]) : NaN;
         // Editable only when we hold the whole file: readTextFile stops at 1 MiB, the view at 400k chars.
-        this.editable = text.length <= 400000 && Buffer.from(text, "utf8").length === size;
+        this.editable = !this.viewer && text.length <= 400000 && Buffer.from(text, "utf8").length === size;
         this.stamp = stamp?.code === 0 ? stamp.stdout.trim() : null;
         this.original = text;
         const resume = draft?.path === path && draft.original === text ? draft.text : null;
@@ -306,7 +317,7 @@ export default class Files extends View {
     const files = (this.entries.get(prefix) ?? []).filter(e => !e.dir && IMAGE.test(e.name))
       .map(e => `${this.root}/${prefix ? `${prefix}/` : ""}${e.name}`);
     openOverlay({ mod: "image-viewer-plus", kind: "dialog", width: 920, height: 0.85,
-      props: { file: `${this.root}/${path}`, fileOn: this.on ?? null, files } });
+      props: { file: `${this.root}/${path}`, fileOn: this.on ?? null, files: files.length ? files : [`${this.root}/${path}`] } });
   }
 
   // ---- editing: a menu row under the right-clicked entry, an inline name field, a Trash confirmation
@@ -450,12 +461,13 @@ export default class Files extends View {
   }
 
   render(cx) {
-    if (key() !== this.context?.key) this.refresh(cx);
+    if (!this.viewer && key() !== this.context?.key) this.refresh(cx);
     const t = theme();
     // The theme turned light or dark: draw the diagrams again in its style.
     if (this.code && this.preview && PREVIEWABLE.test(this.file ?? "") && this.diagramsDark !== isDark(t)) { this.diagramsDark = isDark(t); this.loadDiagrams(cx); }
     return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
-      .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
+      .when(Boolean(this.viewer), el => el.child(this.viewerHeader(t)))
+      .when(!this.viewer, el => el.child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .when(Boolean(this.file), el => el.child(div().id("files-back").w(20).cursor_pointer().text_color(t.muted)
           .on_click((_e, cx) => this.leave(cx => { this.show(null); cx.notify(); }, cx)).child("←")))
         .child(div().font_semibold().child("Files"))
@@ -466,8 +478,10 @@ export default class Files extends View {
         .when(Boolean(this.file) && this.editable, el => el.child(this.button("files-save", this.saving ? "Saving…" : "Save", cx => this.save(cx), t, this.dirty ? "primary" : undefined)))
         .when(Boolean(this.file) && Boolean(this.code) && !this.editable, el => el.child(div().flex_none().text_size(11).text_color(t.dim).child("read-only")))
         .when(!this.file && Boolean(this.root), el => el.child(div().id("files-new").w(20).flex_none().text_center().cursor_pointer().text_color(t.muted).hover(s => s.text_color(t.foreground))
-          .on_click((_e, cx) => this.menu?.path === "" ? this.closeEditing(cx) : this.openMenu("", true, cx)).child("+"))))
-      .when(!this.file, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6)
+          .on_click((_e, cx) => this.menu?.path === "" ? this.closeEditing(cx) : this.openMenu("", true, cx)).child("+")))
+        .when(Boolean(this.file) && (PREVIEWABLE.test(this.file ?? "") || PDF.test(this.file ?? "")), el => el.child(div().id("files-expand").w(20).flex_none().text_center().cursor_pointer().text_color(t.muted).hover(s => s.text_color(t.foreground))
+          .tooltip("Open the preview in a big window").on_click(() => this.expand()).child("⤢")))))
+      .when(!this.file && !this.viewer, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6)
         .on_drop((e, cx) => this.drop(e.paths, "", cx))
         .on_mouse_down("right", (_e, cx) => this.openMenu("", true, cx))
         .when(this.menu?.path === "", el => el.child(this.menuRow("", true, -1, t)))
@@ -492,10 +506,11 @@ export default class Files extends View {
           .when(this.pdf.status === "ready", el => el.child(div().text_size(11).text_color(t.dim)
             .child(`Page 1${this.pdf.pages ? ` of ${this.pdf.pages}` : ""} · Open shows ${this.pdf.pages === 1 ? "it" : "every page"} in your PDF app`)))
         : this.code && this.preview
-        ? v_flex().id("files-markdown").flex_1().min_h(0).overflow_y_scrollbar().px(16).py(12).text_size(13).on_size_change((size, cx) => this.measure(size, cx))
-          .children(this.previewParts().map((part, i) => part.text !== undefined
-            ? TextView.markdown(`files-md-${this.file}-${i}`, part.text).selectable(true).on_link_click((url, cx) => this.followLink(url, cx))
-            : part.diagram ? this.mdDiagram(part, i, t) : this.mdImage(part, i, t)))
+        ? v_flex().id("files-markdown").flex_1().min_h(0).overflow_y_scrollbar().on_size_change((size, cx) => this.measure(size, cx))
+          .child(v_flex().w_full().when(Boolean(this.viewer), el => el.max_w(VIEW_WIDTH).mx_auto().py(12)).px(16).py(12).text_size(this.viewer ? 15 : 13)
+            .children(this.previewParts().map((part, i) => part.text !== undefined
+              ? TextView.markdown(`files-md-${this.file}-${i}`, part.text).selectable(true).on_link_click((url, cx) => this.followLink(url, cx))
+              : part.diagram ? this.mdDiagram(part, i, t) : this.mdImage(part, i, t))))
         : this.code
         ? v_flex().id("files-editor").flex_1().min_h(0)
           .on_key_down((e, cx) => {
@@ -581,7 +596,7 @@ export default class Files extends View {
   // The width for pictures in the preview: the pane in unzoomed px, minus the padding.
   measure(size, cx) {
     const zoom = Number(settings()?.zoom) > 0 ? Number(settings().zoom) : 1;
-    const width = Math.max(80, Math.floor(size.width / zoom) - 32);
+    const width = Math.max(80, Math.min(Math.floor(size.width / zoom), this.viewer && !DIAGRAM_FILE.test(this.file ?? "") && !this.pdf ? VIEW_WIDTH : Infinity) - 32);
     if (width !== this.viewWidth) { this.viewWidth = width; cx.notify(); }
   }
 
@@ -700,7 +715,26 @@ export default class Files extends View {
     const rel = parts.join("/");
     if (!rel) return;
     if (IMAGE.test(rel)) return this.openImage(rel);
+    if (this.viewer) { this.history.push(this.file); this.show(rel, cx); cx.notify(); return; }
     this.leave(cx => this.show(rel, cx), cx);
+  }
+
+  // Opens the shown file's preview in the viewer window.
+  expand() {
+    openOverlay({ mod: "files-plus", kind: "dialog", width: 0.92, height: 0.92,
+      props: { view: true, root: this.root, file: this.file, on: this.on ?? null } });
+  }
+
+  // The viewer window's header: ← back through followed links, the file, Source / Preview, Open, ✕.
+  viewerHeader(t) {
+    return h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
+      .when(this.history.length > 0, el => el.child(div().id("files-view-back").w(20).cursor_pointer().text_color(t.muted)
+        .on_click((_e, cx) => { this.show(this.history.pop(), cx); cx.notify(); }).child("←")))
+      .child(div().flex_1().min_w(0).truncate().font_semibold().child(this.file ?? ""))
+      .when(Boolean(this.code) && PREVIEWABLE.test(this.file ?? ""), el => el.child(this.button("files-view-mode", this.preview ? "Source" : "Preview", cx => { this.preview = !this.preview; this.loadMdImages(cx); cx.notify(); }, t)))
+      .when(this.pdf?.status === "ready", el => el.child(this.button("files-view-open", "Open", () => { exec(window()?.platform === "macos" ? "open" : "xdg-open", [this.pdf.local]).catch(() => null); }, t)))
+      .child(div().id("files-view-close").w(20).flex_none().text_center().cursor_pointer().text_color(t.muted).hover(s => s.text_color(t.foreground))
+        .on_click(() => closeOverlay(props()?.overlay)).child("✕"));
   }
 
   async close(_cx) {

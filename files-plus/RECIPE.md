@@ -92,6 +92,12 @@ A click on:
   draws them anew; unused ones are swept after 14 days. A `.bpmn`, `.mmd` or `.mermaid` file
   opens in Preview as its one diagram (`previewParts`), with `Source` / `Preview` like Markdown;
   on error only the message shows (`Source` has the text).
+- **⤢** (in the header while a Markdown, diagram or PDF file is shown) opens the viewer window:
+  `openOverlay({ mod: "files-plus", kind: "dialog", width: 0.92, height: 0.92, props: { view: true,
+  root, file, on } })`. With `props().view` the mod skips the tree, timers and location tracking and
+  shows that one file read-only: header with ← (back through links followed in it), the file name,
+  `Source` / `Preview`, `Open` for a PDF, ✕ (`closeOverlay(props().overlay)`); Markdown in a
+  centered column at most 900 px wide, 15 px text; pictures fit that column.
 - **a PDF** renders its first page here: copied first from another machine (with progress), then
   `qlmanage -t -s 1600` on macOS or `pdftoppm -png -r 110 -f 1 -l 1` elsewhere. The page count is
   a best guess (`/Type /Page` objects); `Open` hands the local copy to `open` / `xdg-open`.
@@ -213,5 +219,6 @@ file, New folder (inside a folder, or beside a file), Move to Trash (`/usr/bin/t
 - A `.bpmn` file and a `.mmd` file open as their diagram; `Source` shows the text and saves.
 - A two-page PDF shows page 1 and `Page 1 of 2`; `Open` opens it in the PDF app.
 - A relative link in the Markdown opens the linked file in the panel.
+- ⤢ on an open `README.md` shows it in a big dialog with the text in a centered column; ✕ closes it.
 - Right-click → Rename, New file, New folder and Move to Trash work, here and on another machine.
 - Saving a file that changed on disk since it was opened is refused with `Reload from disk`.
