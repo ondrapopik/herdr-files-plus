@@ -89,7 +89,9 @@ A click on:
   by SHA-256), draws each block at its natural size (BPMN on a white card, Mermaid in the `dark` or
   `default` theme by the background's lightness) and screenshots it at 2×. PNGs are named by a hash
   of kind, theme and source, so an unchanged diagram is not drawn again; a theme switch light ↔ dark
-  draws them anew; unused ones are swept after 14 days.
+  draws them anew; unused ones are swept after 14 days. A `.bpmn`, `.mmd` or `.mermaid` file
+  opens in Preview as its one diagram (`previewParts`), with `Source` / `Preview` like Markdown;
+  on error only the message shows (`Source` has the text).
 - **a PDF** renders its first page here: copied first from another machine (with progress), then
   `qlmanage -t -s 1600` on macOS or `pdftoppm -png -r 110 -f 1 -l 1` elsewhere. The page count is
   a best guess (`/Type /Page` objects); `Open` hands the local copy to `open` / `xdg-open`.
@@ -208,6 +210,7 @@ file, New folder (inside a folder, or beside a file), Move to Trash (`/usr/bin/t
   machine; a missing one says `🖼 x: not found`; a web badge shows as its alt text.
 - A ```` ```mermaid ```` flowchart and a ```` ```bpmn ```` process show as pictures; a broken Mermaid
   block shows `Parse error on line …` and its source; opening the file again draws nothing new.
+- A `.bpmn` file and a `.mmd` file open as their diagram; `Source` shows the text and saves.
 - A two-page PDF shows page 1 and `Page 1 of 2`; `Open` opens it in the PDF app.
 - A relative link in the Markdown opens the linked file in the panel.
 - Right-click → Rename, New file, New folder and Move to Trash work, here and on another machine.

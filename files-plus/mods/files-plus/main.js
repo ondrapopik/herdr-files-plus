@@ -13,6 +13,9 @@ import { Player, AUDIO, VIDEO, HTML, openVideo, openInBrowser, sweepCache, newDo
 
 const IMAGE = /\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?)$/i;
 const MARKDOWN = /\.(md|markdown|mdown|mkd)$/i;
+// A diagram file opens as its picture, like Markdown in Preview (Source shows the text).
+const DIAGRAM_FILE = /\.(bpmn|mmd|mermaid)$/i;
+const PREVIEWABLE = /\.(md|markdown|mdown|mkd|bpmn|mmd|mermaid)$/i;
 const PDF = /\.pdf$/i;
 // ![alt](src "title"), also wrapped in a link [![alt](src)](href), or <img src="…">
 const IMG = /\[?!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+["'][^"']*["'])?\s*\)(?:\]\([^)]*\))?|<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi;
@@ -221,7 +224,7 @@ export default class Files extends View {
     this.code?.release(); this.code = null; this.file = path; this.fileError = null;
     this.original = null; this.stamp = null; this.editable = false; this.dirty = false;
     this.saving = false; this.saveError = null; this.saveNote = null; this.leaving = null;
-    this.preview = Boolean(path) && MARKDOWN.test(path);
+    this.preview = Boolean(path) && PREVIEWABLE.test(path);
     this.pdf = null; this.mdImages = new Map(); this.diagrams = new Map();
     if (!path || !cx) return;
     if (PDF.test(path)) return this.loadPdf(path, cx);
@@ -450,7 +453,7 @@ export default class Files extends View {
     if (key() !== this.context?.key) this.refresh(cx);
     const t = theme();
     // The theme turned light or dark: draw the diagrams again in its style.
-    if (this.code && this.preview && MARKDOWN.test(this.file ?? "") && this.diagramsDark !== isDark(t)) { this.diagramsDark = isDark(t); this.loadDiagrams(cx); }
+    if (this.code && this.preview && PREVIEWABLE.test(this.file ?? "") && this.diagramsDark !== isDark(t)) { this.diagramsDark = isDark(t); this.loadDiagrams(cx); }
     return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .when(Boolean(this.file), el => el.child(div().id("files-back").w(20).cursor_pointer().text_color(t.muted)
@@ -458,7 +461,7 @@ export default class Files extends View {
         .child(div().font_semibold().child("Files"))
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.file ?? this.root?.split(/[\\/]/).pop() ?? ""))
         .when(Boolean(this.file) && this.dirty, el => el.child(div().flex_none().text_color(t.blocked).child("●")))
-        .when(Boolean(this.file) && Boolean(this.code) && MARKDOWN.test(this.file ?? ""), el => el.child(this.button("files-md-mode", this.preview ? "Source" : "Preview", cx => { this.preview = !this.preview; this.loadMdImages(cx); cx.notify(); }, t)))
+        .when(Boolean(this.file) && Boolean(this.code) && PREVIEWABLE.test(this.file ?? ""), el => el.child(this.button("files-md-mode", this.preview ? "Source" : "Preview", cx => { this.preview = !this.preview; this.loadMdImages(cx); cx.notify(); }, t)))
         .when(this.pdf?.status === "ready", el => el.child(this.button("files-pdf-open", "Open", () => { exec(window()?.platform === "macos" ? "open" : "xdg-open", [this.pdf.local]).catch(() => null); }, t)))
         .when(Boolean(this.file) && this.editable, el => el.child(this.button("files-save", this.saving ? "Saving…" : "Save", cx => this.save(cx), t, this.dirty ? "primary" : undefined)))
         .when(Boolean(this.file) && Boolean(this.code) && !this.editable, el => el.child(div().flex_none().text_size(11).text_color(t.dim).child("read-only")))
@@ -490,7 +493,7 @@ export default class Files extends View {
             .child(`Page 1${this.pdf.pages ? ` of ${this.pdf.pages}` : ""} · Open shows ${this.pdf.pages === 1 ? "it" : "every page"} in your PDF app`)))
         : this.code && this.preview
         ? v_flex().id("files-markdown").flex_1().min_h(0).overflow_y_scrollbar().px(16).py(12).text_size(13).on_size_change((size, cx) => this.measure(size, cx))
-          .children(mdParts(this.code.value()).map((part, i) => part.text !== undefined
+          .children(this.previewParts().map((part, i) => part.text !== undefined
             ? TextView.markdown(`files-md-${this.file}-${i}`, part.text).selectable(true).on_link_click((url, cx) => this.followLink(url, cx))
             : part.diagram ? this.mdDiagram(part, i, t) : this.mdImage(part, i, t)))
         : this.code
@@ -602,10 +605,10 @@ export default class Files extends View {
 
   // Copies the preview's images into the app folder (image() loads only there), one after another.
   loadMdImages(cx) {
-    if (!this.code || !this.preview || !MARKDOWN.test(this.file ?? "")) return;
+    if (!this.code || !this.preview || !PREVIEWABLE.test(this.file ?? "")) return;
     this.loadDiagrams(cx);
     const on = this.on ?? null, images = this.mdImages;
-    const todo = [...new Set(mdParts(this.code.value()).filter(p => p.image).map(p => this.mdImagePath(p.image)))]
+    const todo = [...new Set(this.previewParts().filter(p => p.image).map(p => this.mdImagePath(p.image)))]
       .slice(0, MAX_MD_IMAGES).filter(abs => !images.has(abs));
     if (!todo.length) return;
     for (const abs of todo) images.set(abs, { status: "loading" });
@@ -622,10 +625,17 @@ export default class Files extends View {
     });
   }
 
+  // What Preview shows: a diagram file is one diagram, Markdown is split by mdParts.
+  previewParts() {
+    const text = this.code?.value() ?? "", m = (this.file ?? "").match(DIAGRAM_FILE);
+    if (!m) return mdParts(text);
+    return text.trim() ? [{ diagram: m[1].toLowerCase() === "bpmn" ? "bpmn" : "mermaid", source: text }] : [{ text: "*Empty diagram file*" }];
+  }
+
   // Draws the preview's Mermaid and BPMN blocks, all in one run; again when the theme turns light/dark.
   loadDiagrams(cx) {
     const dark = isDark(theme()), diagrams = this.diagrams;
-    const todo = [...new Map(mdParts(this.code.value()).filter(p => p.diagram).slice(0, MAX_DIAGRAMS)
+    const todo = [...new Map(this.previewParts().filter(p => p.diagram).slice(0, MAX_DIAGRAMS)
       .map(p => [`${dark}:${p.diagram}:${p.source}`, { kind: p.diagram, source: p.source }])).entries()]
       .filter(([k]) => !diagrams.has(k));
     if (!todo.length) return;
@@ -649,7 +659,7 @@ export default class Files extends View {
     return v_flex().id(`files-md-dia-${i}`).flex_none().py(4).gap(4)
       .child(div().text_size(12).text_color(e?.status === "error" ? t.ansi1 : t.dim)
         .child(e?.status === "error" ? `◇ ${label} diagram: ${e.error}` : `◇ Drawing the ${label} diagram…`))
-      .when(e?.status === "error", el => el.child(TextView.markdown(`files-md-dia-src-${this.file}-${i}`, "```" + (part.diagram === "bpmn" ? "xml" : "") + "\n" + part.source + "\n```").selectable(true)));
+      .when(e?.status === "error" && !DIAGRAM_FILE.test(this.file ?? ""), el => el.child(TextView.markdown(`files-md-dia-src-${this.file}-${i}`, "```" + (part.diagram === "bpmn" ? "xml" : "") + "\n" + part.source + "\n```").selectable(true)));
   }
 
   mdImage(part, i, t) {

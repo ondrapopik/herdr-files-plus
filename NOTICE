@@ -12,6 +12,7 @@ Changes to `files` (now `files-plus`):
 - Download (to ~/Downloads) and upload by dropping files from Finder
 - Markdown files open as a rendered preview with a Source / Preview toggle, with their local images
   and their Mermaid and BPMN diagrams (diagrams.mjs; mermaid and bpmn-js are downloaded at first use)
+- .bpmn, .mmd and .mermaid files open as their diagram, with Source for the text
 - PDF files show their first page, with Open for the whole document
 - right-click menu: rename, new file, new folder, move to the Trash
 - text files are editable and saved, also on another machine

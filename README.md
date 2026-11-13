@@ -24,7 +24,8 @@ See [files-plus/RECIPE.md](files-plus/RECIPE.md) for how it is built.
   opens one in the viewer. Images from the web show as their alt text.
 - **Diagrams in Markdown**: ```` ```mermaid ```` and ```` ```bpmn ```` blocks (BPMN 2.0 XML with its
   diagram section) show as pictures, in the theme's light or dark style; a click opens one in the
-  viewer to zoom. A broken block shows the error and its source. Needs Node.js and Google Chrome
+  viewer to zoom. A broken block shows the error and its source. Files of their own (`.bpmn`,
+  `.mmd`, `.mermaid`) open as the diagram too, with **Source** for the text. Needs Node.js and Google Chrome
   (or Chromium); mermaid and the bpmn-js viewer are downloaded once from jsDelivr (pinned versions,
   SHA-256 checked) into `data/files-plus-diagrams/`.
 - **PDF**: the first page, rendered here (macOS Quick Look, `pdftoppm` on Linux), with the page
