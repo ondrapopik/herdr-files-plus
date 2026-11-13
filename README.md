@@ -3,7 +3,7 @@
 **Files+** for the Herdr app: the built-in Files panel, extended. It works the same on this computer
 and on another machine (a space opened over `hc`): images open in a viewer with ← / →, audio plays
 in a bar at the bottom of the panel, videos open in your player with a download progress bar,
-Markdown opens as a rendered preview with its images, a PDF shows its first page, files of another machine download to `~/Downloads`, files
+Markdown opens as a rendered preview with its images and Mermaid / BPMN diagrams, a PDF shows its first page, files of another machine download to `~/Downloads`, files
 dropped from Finder upload, and right-click lets you rename, create and move to the Trash.
 See [files-plus/RECIPE.md](files-plus/RECIPE.md) for how it is built.
 
@@ -22,6 +22,11 @@ See [files-plus/RECIPE.md](files-plus/RECIPE.md) for how it is built.
   file in the panel, web links in the browser. Local images (`![alt](img/x.png)`, `<img src>`)
   show at the panel's width, also from another machine (up to 25 MB each, 40 per file); a click
   opens one in the viewer. Images from the web show as their alt text.
+- **Diagrams in Markdown**: ```` ```mermaid ```` and ```` ```bpmn ```` blocks (BPMN 2.0 XML with its
+  diagram section) show as pictures, in the theme's light or dark style; a click opens one in the
+  viewer to zoom. A broken block shows the error and its source. Needs Node.js and Google Chrome
+  (or Chromium); mermaid and the bpmn-js viewer are downloaded once from jsDelivr (pinned versions,
+  SHA-256 checked) into `data/files-plus-diagrams/`.
 - **PDF**: the first page, rendered here (macOS Quick Look, `pdftoppm` on Linux), with the page
   count and **Open** for the whole document in your PDF app.
 - **Another machine**: media are copied here first in 7 MiB chunks, 6 at once (`hc exec` keeps only the first
@@ -62,15 +67,18 @@ Ask your agent to add this mod (it reads every file first), or do it by hand:
 **What it runs:** like the built-in Files panel, it runs programs through `exec` (`sh`, `git`,
 `stat`), on another machine too. On top of that it runs `hc exec` to copy files to and from another
 machine, `open` (macOS) for videos, HTML and PDFs, `qlmanage` / `pdftoppm` and `sips` / `file` for
-previews, `ffplay` / `ffprobe` for audio (`brew install ffmpeg`),
-and `trash` / `gio` / `trash-put` for Move to Trash. It writes only in `data/files-plus-media/`
-and `data/image-viewer-plus/` of the app folder and in `~/Downloads`, plus the files you edit,
+previews, `ffplay` / `ffprobe` for audio (`brew install ffmpeg`), `node` with headless Chrome for diagrams,
+and `trash` / `gio` / `trash-put` for Move to Trash. It writes only in `data/files-plus-media/`,
+`data/files-plus-diagrams/` and `data/image-viewer-plus/` of the app folder and in `~/Downloads`, plus the files you edit,
 create, rename, upload or trash.
 
 ## Credits
 
 Built on the `files` and `image-viewer` mods shipped with the Herdr app (0.1.13), Apache License
 2.0. See [NOTICE](NOTICE) for what was changed.
+
+Diagrams are drawn with [mermaid](https://mermaid.js.org) (MIT) and
+[bpmn-js](https://bpmn.io) (bpmn.io license), downloaded at first use, not part of this repository.
 
 ## License
 

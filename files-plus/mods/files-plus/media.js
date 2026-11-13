@@ -4,7 +4,7 @@
 // Files on another machine are first copied to data/files-plus-media/ (swept after a day).
 import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, appHome, notify, window } from "herdr";
+import { exec, appHome, notify, window, writeTextFile } from "herdr";
 
 export const AUDIO = /\.(mp3|m4a|aac|wav|aiff?|flac|ogg|oga|opus|caf|alac|wma)$/i;
 export const VIDEO = /\.(mp4|m4v|mov|mkv|webm|avi|wmv|flv|mpe?g|3gp|ts)$/i;
@@ -178,9 +178,36 @@ export async function pdfPreview(src, on, hooks) {
   return { rel: relToApp(page), ...(await dimensions(page)), pages: Number(count?.stdout.trim()) || 0, local };
 }
 
+// Mermaid and BPMN blocks of a Markdown preview, drawn to PNG by diagrams.mjs (Node.js + headless Chrome),
+// all of them in one run. Kept in data/files-plus-diagrams/ by content, swept after 14 days unused.
+// items: [{ kind, source }]; returns, in the same order, { rel, w, h } or { error }.
+const DIAGRAMS = "data/files-plus-diagrams";
+const hash2 = s => { let h = 0x811c9dc5; for (const c of s) h = Math.imul(h ^ c.charCodeAt(0), 16777619) >>> 0; return h.toString(36); };
+export async function renderDiagrams(items, dark) {
+  const dir = `${appHome()}/${DIAGRAMS}`;
+  const ids = items.map(it => { const k = `${it.kind}:${dark ? 1 : 0}:${it.source}`; return `${it.kind}-${hash(k)}${hash2(k)}${k.length.toString(36)}`; });
+  const jobFile = `${dir}/job-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.json`;
+  const mk = await exec("mkdir", ["-p", dir]);
+  if (mk.code !== 0) throw new Error(mk.stderr.trim() || "Cannot create the diagram folder");
+  await writeTextFile(jobFile, JSON.stringify({ dir, dark, items: items.map((it, i) => ({ id: ids[i], kind: it.kind, source: it.source })) }), null);
+  let r;
+  try { r = await exec("node", [`${appHome()}/mods/files-plus/diagrams.mjs`, jobFile], { timeout: 120000 }); }
+  catch { throw new Error("Install Node.js to draw diagrams"); }
+  finally { exec("rm", ["-f", jobFile]).catch(() => null); }
+  let out;
+  try { out = JSON.parse(r.stdout.trim().split("\n").pop()); }
+  catch { throw new Error((r.stderr.trim().split("\n").pop() || "Cannot draw diagrams").slice(0, 300)); }
+  const byId = new Map(out.results.map(x => [x.id, x]));
+  return ids.map(id => {
+    const x = byId.get(id);
+    return !x ? { error: "not drawn" } : x.error ? { error: x.error } : { rel: relToApp(x.file), w: x.w, h: x.h, file: x.file };
+  });
+}
+
 export async function sweepCache() {
   await exec("find", [`${appHome()}/${CACHE}`, "-type", "f", "-mtime", "+1", "-delete"]).catch(() => null);
   await exec("find", [`${appHome()}/${CACHE}`, "-mindepth", "1", "-type", "d", "-empty", "-delete"]).catch(() => null);
+  await exec("find", [`${appHome()}/${DIAGRAMS}`, "-maxdepth", "1", "-type", "f", "-mtime", "+14", "-delete"]).catch(() => null);
 }
 
 export const HTML = /\.(html?|xhtml)$/i;

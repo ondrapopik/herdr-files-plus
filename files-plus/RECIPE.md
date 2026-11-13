@@ -37,7 +37,9 @@ UI font at 13px.
    - **A Markdown file**: the rendered document, scrollable, 16px side and 12px vertical padding,
      selectable text. Local images sit between the text blocks at their size, never wider than the
      pane (unknown size: a 480×240 box they fit in); while copying `🖼 alt …` in `t.dim`, on error
-     `🖼 alt: not found` in `t.ansi1`.
+     `🖼 alt: not found` in `t.ansi1`. Mermaid and BPMN blocks show as pictures the same way
+     (a click opens one in the image dialog to zoom); while drawing `◇ Drawing the Mermaid diagram…`
+     in `t.dim`, on error `◇ Mermaid diagram: <message>` in `t.ansi1` with the block's source under it.
    - **A PDF**: its first page as an image at the pane's width, under it `Page 1 of 3 · Open shows
      every page in your PDF app` in 11px `t.dim`; `Open` in the header. While it loads:
      `Copying from <machine>… 45 %` or `Rendering the first page…`.
@@ -78,7 +80,16 @@ A click on:
   Images: `![alt](path "title")`, `[![alt](path)](link)` and `<img src="path">` with a local path
   (relative to the file, or absolute) are copied into the app folder one after another (up to 40
   per file, 25 MB each) and drawn in place; a click opens one in the image dialog. Web images
-  (`http(s):`, `data:`) become their alt text. Lines inside ``` / ~~~ fences are left alone.
+  (`http(s):`, `data:`) become their alt text. Lines inside ``` / ~~~ fences are left alone (a
+  fence closes only on the same character, at least as long, so ```` blocks can quote ``` ones).
+  Diagrams: fenced ```` ```mermaid ```` and ```` ```bpmn ```` blocks (BPMN XML with its BPMNDiagram
+  section) are drawn to PNG by `diagrams.mjs` (`node`, up to 60 per file, all in one run): it starts
+  Google Chrome / Chromium headless over `--remote-debugging-pipe`, loads mermaid 12.2.0 and the
+  bpmn-js 18.31.1 viewer (fetched once from jsDelivr into `data/files-plus-diagrams/lib/`, checked
+  by SHA-256), draws each block at its natural size (BPMN on a white card, Mermaid in the `dark` or
+  `default` theme by the background's lightness) and screenshots it at 2×. PNGs are named by a hash
+  of kind, theme and source, so an unchanged diagram is not drawn again; a theme switch light ↔ dark
+  draws them anew; unused ones are swept after 14 days.
 - **a PDF** renders its first page here: copied first from another machine (with progress), then
   `qlmanage -t -s 1600` on macOS or `pdftoppm -png -r 110 -f 1 -l 1` elsewhere. The page count is
   a best guess (`/Type /Page` objects); `Open` hands the local copy to `open` / `xdg-open`.
@@ -126,15 +137,18 @@ file, New folder (inside a folder, or beside a file), Move to Trash (`/usr/bin/t
 - `mods/files-plus/media.js`: `pull` (the chunked copy here), `localCopy` (cached copies for
   playing), `download` (to `~/Downloads`), `upload` (chunks piped into `hc exec -i`),
   `stageImage` (a Markdown image into the app folder, with its pixel size), `pdfPreview` (the
-  first page), `openVideo`, `openInBrowser`, `Player` (the audio bar), `newDownload` / `downloadView` (the
+  first page), `renderDiagrams` (runs `diagrams.mjs` with a job file), `openVideo`, `openInBrowser`, `Player` (the audio bar), `newDownload` / `downloadView` (the
   transfer bar), `sweepCache`. The queue (`enqueue`, `next`) and `drop` live in `main.js`;
   drops arrive through `.on_drop(e => e.paths)` on the tree and on each row.
+- `mods/files-plus/diagrams.mjs`: a Node.js script (no packages) that drives Chrome over the
+  DevTools protocol (`Target.createTarget`, `Runtime.evaluate` of `draw(kind, source)`,
+  `Page.captureScreenshot` with a clip and a transparent background) and prints `{ results }`.
 - `mods/image-viewer-plus/main.js`: clone of the shipped `image-viewer`. Stages the image into the
   app folder (`image()` only loads paths there), reads its pixel size with `sips` (macOS) or
   `file` (Linux) or `System.Drawing` (Windows), deletes the copy on close.
 - Programs: `sh`, `git`, `stat`, `hc exec --on <machine> -- dd`, `dd … | hc exec --on <machine>
   -i -- sh -c 'cat >> …'`, `cp`, `open` / `xdg-open`, `qlmanage` / `pdftoppm`, `sips` / `file`, `ffplay`, `ffprobe`,
-  `kill`, `find`, `trash` / `gio` / `trash-put`, `sips` / `file`.
+  `kill`, `find`, `trash` / `gio` / `trash-put`, `sips` / `file`, `node` + Chrome (diagrams).
 - Icons: `chevron-down.svg`, `chevron-right.svg`, `file.svg`, `folder.svg` (14px / 12px, `svg()`).
 - The layout: the `files` block of a cloned `main` layout points at `files-plus`.
 
@@ -171,6 +185,9 @@ file, New folder (inside a folder, or beside a file), Move to Trash (`/usr/bin/t
   render of the same path.
 - Quick Look writes `<name>.pdf.png` into the output folder; `qlmanage` can hang, so its `exec`
   has a 60 s timeout.
+- `mermaid.render` sets `max-width: 100%` on its SVG: set its `width` / `height` from the viewBox,
+  or wide diagrams shrink to the page. bpmn-js needs a container in the page while importing; its
+  `saveSVG()` has no watermark and no background.
 - Watching the folder works only on this computer; another machine relies on the 10 s refresh.
 
 ## Done when
@@ -189,6 +206,8 @@ file, New folder (inside a folder, or beside a file), Move to Trash (`/usr/bin/t
 - A `README.md` opens rendered; `Source` shows the editor; an edit shows in `Preview`; ⌘S saves.
 - A Markdown file with `![x](img/a.png)` shows the picture at the pane's width, also on another
   machine; a missing one says `🖼 x: not found`; a web badge shows as its alt text.
+- A ```` ```mermaid ```` flowchart and a ```` ```bpmn ```` process show as pictures; a broken Mermaid
+  block shows `Parse error on line …` and its source; opening the file again draws nothing new.
 - A two-page PDF shows page 1 and `Page 1 of 2`; `Open` opens it in the PDF app.
 - A relative link in the Markdown opens the linked file in the panel.
 - Right-click → Rename, New file, New folder and Move to Trash work, here and on another machine.

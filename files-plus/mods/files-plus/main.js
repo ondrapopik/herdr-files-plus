@@ -9,7 +9,7 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, InputState, Input, TextView } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, openOverlay, notify, home } from "herdr";
 import { Buffer } from "buffer";
-import { Player, AUDIO, VIDEO, HTML, openVideo, openInBrowser, sweepCache, newDownload, downloadView, download, upload, stageImage, pdfPreview } from "./media.js";
+import { Player, AUDIO, VIDEO, HTML, openVideo, openInBrowser, sweepCache, newDownload, downloadView, download, upload, stageImage, pdfPreview, renderDiagrams } from "./media.js";
 
 const IMAGE = /\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?)$/i;
 const MARKDOWN = /\.(md|markdown|mdown|mkd)$/i;
@@ -18,17 +18,36 @@ const PDF = /\.pdf$/i;
 const IMG = /\[?!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+["'][^"']*["'])?\s*\)(?:\]\([^)]*\))?|<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi;
 const WEB = /^(https?:|data:|\/\/)/i;
 const MAX_MD_IMAGES = 40;
+const MAX_DIAGRAMS = 60;
+// A dark theme draws Mermaid in its dark style (by the background's lightness, "#rrggbb").
+const isDark = t => { const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(t?.background ?? "");
+  return !m || (0.2126 * parseInt(m[1], 16) + 0.7152 * parseInt(m[2], 16) + 0.0722 * parseInt(m[3], 16)) < 128; };
 
-// TextView draws no images, so the Markdown is split into text and local images, in order.
-// Images from the web stay in the text as their alt text.
+// TextView draws no images, so the Markdown is split into text, local images and diagrams, in order.
+// Images from the web stay in the text as their alt text. ```mermaid and ```bpmn blocks become
+// { diagram, source }; other fenced code (also ```` blocks quoting a ``` block) stays text.
 function mdParts(text) {
   const parts = [];
-  let buf = [], fence = null;
+  let buf = [], fence = null, diagram = null;
   const flush = () => { if (buf.length) { parts.push({ text: buf.join("\n") }); buf = []; } };
   for (const line of text.split("\n")) {
-    const f = line.match(/^\s*(```+|~~~+)/);
-    if (f) { if (!fence) fence = f[1][0]; else if (f[1][0] === fence) fence = null; buf.push(line); continue; }
-    if (fence || (!line.includes("![") && !/<img/i.test(line))) { buf.push(line); continue; }
+    if (fence) {
+      const c = line.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+      if (c && c[1][0] === fence[0] && c[1].length >= fence.length) {
+        fence = null;
+        if (diagram) { parts.push({ diagram: diagram.kind, source: diagram.lines.join("\n") }); diagram = null; continue; }
+      }
+      if (diagram) diagram.lines.push(line); else buf.push(line);
+      continue;
+    }
+    const f = line.match(/^ {0,3}(`{3,}|~{3,})\s*([^`\s]*)/);
+    if (f) {
+      fence = f[1];
+      const kind = f[2].toLowerCase();
+      if (kind === "mermaid" || kind === "bpmn") { flush(); diagram = { kind, lines: [] }; } else buf.push(line);
+      continue;
+    }
+    if (!line.includes("![") && !/<img/i.test(line)) { buf.push(line); continue; }
     let last = 0, pending = "", any = false;
     for (const m of line.matchAll(IMG)) {
       const src = m[2] ?? m[3], alt = m[1] ?? m[0].match(/\balt\s*=\s*["']([^"']*)["']/i)?.[1] ?? "";
@@ -40,6 +59,7 @@ function mdParts(text) {
     pending += line.slice(last);
     if (!any || pending.trim()) buf.push(pending);
   }
+  if (diagram) buf.push("```" + diagram.kind, ...diagram.lines); // never closed: show it as code
   flush();
   return parts;
 }
@@ -107,7 +127,7 @@ export default class Files extends View {
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
     this.player = new Player();
     this.transfer = null; this.queue = [];
-    this.mdImages = new Map(); this.pdf = null;
+    this.mdImages = new Map(); this.diagrams = new Map(); this.pdf = null;
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
     cx.timer.every(1000, cx => { this.player.tick(cx); if (this.transfer) cx.notify(); }); // only does work while a track plays or a copy runs
@@ -202,7 +222,7 @@ export default class Files extends View {
     this.original = null; this.stamp = null; this.editable = false; this.dirty = false;
     this.saving = false; this.saveError = null; this.saveNote = null; this.leaving = null;
     this.preview = Boolean(path) && MARKDOWN.test(path);
-    this.pdf = null; this.mdImages = new Map();
+    this.pdf = null; this.mdImages = new Map(); this.diagrams = new Map();
     if (!path || !cx) return;
     if (PDF.test(path)) return this.loadPdf(path, cx);
     const context = this.context, root = this.root, on = this.on, abs = `${root}/${path}`;
@@ -429,6 +449,8 @@ export default class Files extends View {
   render(cx) {
     if (key() !== this.context?.key) this.refresh(cx);
     const t = theme();
+    // The theme turned light or dark: draw the diagrams again in its style.
+    if (this.code && this.preview && MARKDOWN.test(this.file ?? "") && this.diagramsDark !== isDark(t)) { this.diagramsDark = isDark(t); this.loadDiagrams(cx); }
     return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .when(Boolean(this.file), el => el.child(div().id("files-back").w(20).cursor_pointer().text_color(t.muted)
@@ -470,7 +492,7 @@ export default class Files extends View {
         ? v_flex().id("files-markdown").flex_1().min_h(0).overflow_y_scrollbar().px(16).py(12).text_size(13).on_size_change((size, cx) => this.measure(size, cx))
           .children(mdParts(this.code.value()).map((part, i) => part.text !== undefined
             ? TextView.markdown(`files-md-${this.file}-${i}`, part.text).selectable(true).on_link_click((url, cx) => this.followLink(url, cx))
-            : this.mdImage(part, i, t)))
+            : part.diagram ? this.mdDiagram(part, i, t) : this.mdImage(part, i, t)))
         : this.code
         ? v_flex().id("files-editor").flex_1().min_h(0)
           .on_key_down((e, cx) => {
@@ -581,6 +603,7 @@ export default class Files extends View {
   // Copies the preview's images into the app folder (image() loads only there), one after another.
   loadMdImages(cx) {
     if (!this.code || !this.preview || !MARKDOWN.test(this.file ?? "")) return;
+    this.loadDiagrams(cx);
     const on = this.on ?? null, images = this.mdImages;
     const todo = [...new Set(mdParts(this.code.value()).filter(p => p.image).map(p => this.mdImagePath(p.image)))]
       .slice(0, MAX_MD_IMAGES).filter(abs => !images.has(abs));
@@ -597,6 +620,36 @@ export default class Files extends View {
         cx.notify();
       }
     });
+  }
+
+  // Draws the preview's Mermaid and BPMN blocks, all in one run; again when the theme turns light/dark.
+  loadDiagrams(cx) {
+    const dark = isDark(theme()), diagrams = this.diagrams;
+    const todo = [...new Map(mdParts(this.code.value()).filter(p => p.diagram).slice(0, MAX_DIAGRAMS)
+      .map(p => [`${dark}:${p.diagram}:${p.source}`, { kind: p.diagram, source: p.source }])).entries()]
+      .filter(([k]) => !diagrams.has(k));
+    if (!todo.length) return;
+    for (const [k] of todo) diagrams.set(k, { status: "loading" });
+    cx.spawn(async cx => {
+      let out;
+      try { out = await renderDiagrams(todo.map(([, d]) => d), dark); }
+      catch (e) { out = todo.map(() => ({ error: String(e?.message ?? e) })); }
+      todo.forEach(([k], i) => Object.assign(diagrams.get(k), out[i], { status: out[i].error ? "error" : "ready" }));
+      if (this.diagrams === diagrams) cx.notify();
+    });
+  }
+
+  // A diagram: the picture (a click opens it in the viewer to zoom), or its state; an error shows the source too.
+  mdDiagram(part, i, t) {
+    const label = part.diagram === "bpmn" ? "BPMN" : "Mermaid";
+    const e = this.diagrams.get(`${isDark(t)}:${part.diagram}:${part.source}`);
+    if (e?.status === "ready") return div().id(`files-md-dia-${i}`).flex_none().py(6).cursor_pointer()
+      .on_click(() => openOverlay({ mod: "image-viewer-plus", kind: "dialog", width: 920, height: 0.85, props: { file: e.file, fileOn: null, files: [e.file] } }))
+      .child(this.picture(e, `files-md-dia-pic-${i}`, t));
+    return v_flex().id(`files-md-dia-${i}`).flex_none().py(4).gap(4)
+      .child(div().text_size(12).text_color(e?.status === "error" ? t.ansi1 : t.dim)
+        .child(e?.status === "error" ? `◇ ${label} diagram: ${e.error}` : `◇ Drawing the ${label} diagram…`))
+      .when(e?.status === "error", el => el.child(TextView.markdown(`files-md-dia-src-${this.file}-${i}`, "```" + (part.diagram === "bpmn" ? "xml" : "") + "\n" + part.source + "\n```").selectable(true)));
   }
 
   mdImage(part, i, t) {
