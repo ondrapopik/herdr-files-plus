@@ -98,6 +98,11 @@ A click on:
   shows that one file read-only: header with ← (back through links followed in it), the file name,
   `Source` / `Preview`, `Open` for a PDF, ✕ (`closeOverlay(props().overlay)`); Markdown in a
   centered column at most 900 px wide, 15 px text; pictures fit that column.
+- **Size and date** on each row, right of the name in 11px `t.dim`: files `bytes · when`, folders
+  `when` (`14:05` today, `13 Nov` this year, `13 Nov 2025` before); a tooltip has the exact bytes
+  and `modified 13 Nov 2026 14:05`. The listing script collects the entries' paths and ends with
+  `#stat\0` and one `stat -c "%s %Y"` (GNU) or `stat -f "%z %m"` (BSD) for all of them; the values
+  are used only when there is one line per entry. PowerShell adds `Length` and `LastWriteTimeUtc`.
 - **Several entries**: ⌘ / Ctrl-click toggles one into `selected` (a set of relative paths, kept
   per tab in `saved`), Shift-click adds the range between the last click and this one in the shown
   order; a plain click clears it and opens as before. Selected rows use `t.selected`. A bar above the

@@ -108,6 +108,16 @@ const WRITE = 'f=$1; want=$2; shift 2; ' +
   'cat "$tmp" > "$f"; rc=$?; rm -f "$tmp"; exit $rc';
 const parentOf = (path) => path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
 const baseOf = (path) => path.slice(path.lastIndexOf("/") + 1);
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const bytes = n => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`
+  : n < 1073741824 ? `${(n / 1048576).toFixed(n < 10485760 ? 1 : 0)} MB` : `${(n / 1073741824).toFixed(1)} GB`;
+// Today: 14:05; this year: 13 Nov; earlier: 13 Nov 2025.
+const when = s => {
+  const d = new Date(s * 1000), now = new Date(), hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  if (d.toDateString() === now.toDateString()) return hm;
+  return `${d.getDate()} ${MONTHS[d.getMonth()]}${d.getFullYear() === now.getFullYear() ? "" : ` ${d.getFullYear()}`}`;
+};
+const stamp = s => { const d = new Date(s * 1000); return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
 
 async function directory(path, on) {
   const windowsDirectory = async () => {
@@ -115,13 +125,15 @@ async function directory(path, on) {
     // Links keep directory attributes even when dangling; check their target.
     // Other reparse points (OneDrive's folders) have no LinkType and are folders.
     // PowerShell reads curly single quotes as quotes too, so they're doubled like '.
-    const r = await exec("powershell", ["-NoProfile", "-Command", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); & { param($p) @(Get-ChildItem -LiteralPath $p -Force -ErrorAction Stop | Where-Object Name -ne '.git' | Select-Object -First 501 | ForEach-Object { @{ name=$_.Name; dir=($_.PSIsContainer -and (-not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -or -not $_.LinkType -or ($_.Target -and [IO.Directory]::Exists(([IO.Path]::Combine([IO.Path]::GetDirectoryName($_.FullName), $_.Target[0])))))) } }) | ConvertTo-Json -Compress } '" + path.replace(/['‘’‚‛]/g, "$&$&") + "'"], { on });
+    const r = await exec("powershell", ["-NoProfile", "-Command", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); & { param($p) @(Get-ChildItem -LiteralPath $p -Force -ErrorAction Stop | Where-Object Name -ne '.git' | Select-Object -First 501 | ForEach-Object { @{ name=$_.Name; size=$_.Length; mtime=([DateTimeOffset]$_.LastWriteTimeUtc).ToUnixTimeSeconds(); dir=($_.PSIsContainer -and (-not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -or -not $_.LinkType -or ($_.Target -and [IO.Directory]::Exists(([IO.Path]::Combine([IO.Path]::GetDirectoryName($_.FullName), $_.Target[0])))))) } }) | ConvertTo-Json -Compress } '" + path.replace(/['‘’‚‛]/g, "$&$&") + "'"], { on });
     if (r.code !== 0) throw new Error(r.stderr || "Cannot list this folder");
     const result = JSON.parse(r.stdout || "[]");
     return Array.isArray(result) ? result : [result];
   };
   if (!on && window()?.platform === "windows") return windowsDirectory();
-  const script = 'n=0; for p in "$1"/* "$1"/.[!.]* "$1"/..?*; do [ -e "$p" ] || [ -L "$p" ] || continue; name=${p##*/}; [ "$name" = .git ] && continue; if [ -d "$p" ]; then kind=d; else kind=f; fi; printf "%s\\0%s\\0" "$kind" "$name"; n=$((n+1)); [ "$n" -gt 500 ] && break; done; test -d "$1"';
+  // kind\0name\0 per entry, then "#stat" and one "size mtime" line per entry from a single stat (GNU, else BSD).
+  const script = 'd=$1; n=0; set --; for p in "$d"/* "$d"/.[!.]* "$d"/..?*; do [ -e "$p" ] || [ -L "$p" ] || continue; name=${p##*/}; [ "$name" = .git ] && continue; if [ -d "$p" ]; then kind=d; else kind=f; fi; printf "%s\\0%s\\0" "$kind" "$name"; set -- "$@" "$p"; n=$((n+1)); [ "$n" -gt 500 ] && break; done; test -d "$d" || exit 1; ' +
+    'printf "#stat\\0"; [ $# -gt 0 ] || exit 0; s=$(stat -c "%s %Y" -- "$@" 2>/dev/null) || s=$(stat -f "%z %m" "$@" 2>/dev/null); printf "%s" "$s"; exit 0';
   let r;
   try { r = await exec("sh", ["-c", script, "files", path], { on }); }
   catch (e) {
@@ -130,7 +142,15 @@ async function directory(path, on) {
   }
   if (r.code !== 0) throw new Error(r.stderr || "Cannot list this folder");
   const fields = r.stdout.split("\0"), out = [];
-  for (let i = 0; i + 1 < fields.length; i += 2) out.push({ name: fields[i + 1], dir: fields[i] === "d" });
+  let i = 0;
+  for (; i + 1 < fields.length && fields[i] !== "#stat"; i += 2) out.push({ name: fields[i + 1], dir: fields[i] === "d" });
+  // Sizes and times only when stat answered for every entry (else they would be shifted).
+  const stats = fields[i] === "#stat" ? (fields[i + 1] ?? "").trim().split("\n").filter(Boolean) : [];
+  if (stats.length === out.length) stats.forEach((line, k) => {
+    const [size, mtime] = line.trim().split(/\s+/).map(Number);
+    if (Number.isFinite(size)) out[k].size = size;
+    if (Number.isFinite(mtime)) out[k].mtime = mtime;
+  });
   return out;
 }
 
@@ -570,6 +590,9 @@ export default class Files extends View {
         .child(entry.dir ? svg(`mods/files-plus/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
         .child(svg(`mods/files-plus/${entry.dir ? "folder" : "file"}.svg`).size(14).flex_none().text_color(t.muted))
         .child(div().flex_1().min_w(0).truncate().child(entry.name))
+        .when(entry.mtime !== undefined && true, el => el.child(div().id(`file-meta-${path}`).flex_none().text_size(11).text_color(t.dim)
+          .tooltip(`${entry.dir ? "" : `${(entry.size ?? 0).toLocaleString("en-US")} bytes · `}modified ${stamp(entry.mtime)}`)
+          .child(!entry.dir && entry.size !== undefined ? `${bytes(entry.size)} · ${when(entry.mtime)}` : when(entry.mtime))))
         .when(Boolean(mark), el => el.child(div().text_size(11).text_color(mark === "A" ? t.ansi2 : mark === "D" || mark === "U" ? t.ansi1 : t.blocked).child(mark))));
       if (this.menu?.path === path) out.push(this.menuRow(path, entry.dir, depth, t));
       if (this.trashing === path) out.push(this.trashRow(path, depth, t));

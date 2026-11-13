@@ -42,6 +42,9 @@ See [files-plus/RECIPE.md](files-plus/RECIPE.md) for how it is built.
   (beside it). On another machine they go over in 7 MiB chunks, 6 at once; here they are copied (folders
   too). Nothing is overwritten. Transfers run one at a time, the bar shows `↓` / `↑` and how many
   wait.
+- **Size and date**: each row shows a file's size and when it last changed (`12 KB · 13 Nov`; today
+  just the time, earlier years with the year), a folder its date; hover for the exact bytes and time.
+  One `stat` per folder, also on another machine.
 - **Several at once**: ⌘-click (Ctrl-click) adds or removes an entry, Shift-click takes the range;
   a bar above the tree offers **Copy**, **Move**, **Download** (files of another machine), **Copy
   path** and **Move to Trash** (asks first). After Copy / Move, right-click a folder → **Paste
