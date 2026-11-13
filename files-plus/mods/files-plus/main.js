@@ -89,6 +89,14 @@ const OPS = {
     'elif command -v trash-put >/dev/null 2>&1; then trash-put -- "$1"; ' +
     'else echo "No Trash on this machine (install gio or trash-cli)" >&2; exit 1; fi',
 };
+// Several entries at once: $1 the target folder, the rest the sources. Checks every name first.
+const MANY = {
+  copy: 'dst=$1; shift; for p; do n=${p##*/}; [ -e "$dst/$n" ] && { echo "$n already exists there" >&2; exit 1; }; done; ' +
+    'for p; do case "$dst/" in "$p"/*) echo "Cannot copy ${p##*/} into itself" >&2; exit 1;; esac; cp -R -- "$p" "$dst/" || exit 1; done',
+  move: 'dst=$1; shift; same=0; for p; do [ "${p%/*}" = "$dst" ] && same=$((same+1)); done; [ "$same" -eq $# ] && { echo "Already in this folder: pick another one" >&2; exit 1; }; ' +
+    'for p; do n=${p##*/}; [ "${p%/*}" = "$dst" ] && continue; [ -e "$dst/$n" ] && { echo "$n already exists there" >&2; exit 1; }; done; ' +
+    'for p; do [ "${p%/*}" = "$dst" ] && continue; case "$dst/" in "$p"/*) echo "Cannot move ${p##*/} into itself" >&2; exit 1;; esac; mv -- "$p" "$dst/" || exit 1; done',
+};
 // "mtime:size" of a file (GNU stat, else BSD/macOS stat)
 const STAMP = 'stat -c %Y:%s -- "$1" 2>/dev/null || stat -f %m:%z "$1"';
 // Writes base64 chunks ($3…) to $1 if its stamp is still $2; keeps the file's inode and permissions.
@@ -129,7 +137,7 @@ async function directory(path, on) {
 export default class Files extends View {
   init(_props, cx) {
     this.saved = new Map();
-    this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
+    this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {}; this.selected = new Set(); this.visible = [];
     this.player = new Player();
     this.transfer = null; this.queue = [];
     this.mdImages = new Map(); this.diagrams = new Map(); this.pdf = null;
@@ -169,15 +177,17 @@ export default class Files extends View {
     const used = [...this.entries.entries()].filter(([p]) => p !== path).reduce((n, [, e]) => n + e.length, 0);
     this.entries.set(path, entries.slice(0, Math.max(0, Math.min(PER_FOLDER, TOTAL - used))).sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name)));
     if (entries.length > PER_FOLDER || used + entries.length > TOTAL) this.limited = true;
+    // Selected entries of this folder that are gone (deleted, renamed outside) drop out of the selection.
+    for (const p of [...this.selected]) if (parentOf(p) === path && !entries.some(e => e.name === baseOf(p))) this.selected.delete(p);
   }
 
   refresh(cx) {
     const { cwd, on } = location(), next = key();
     if (next !== this.context?.key) {
-      if (this.context) this.saved.set(this.context.key, { folders: this.folders, file: this.file, draft: this.draft() });
+      if (this.context) this.saved.set(this.context.key, { folders: this.folders, file: this.file, draft: this.draft(), selected: this.selected, anchor: this.anchor });
       const saved = this.saved.get(next);
       this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
-      this.pending = new Set(); this.marks = {}; this.show(null); this.watched = null; this.error = null; this.limited = false;
+      this.pending = new Set(); this.marks = {}; this.selected = new Set(saved?.selected); this.anchor = saved?.anchor ?? null; this.manyTrash = false; this.show(null); this.watched = null; this.error = null; this.limited = false;
       this.menu = null; this.edit = null; this.trashing = null; this.opError = null;
       this.loading = false;
       if (saved?.file) this.show(saved.file, cx, saved.draft);
@@ -387,6 +397,112 @@ export default class Files extends View {
     }
   }
 
+  // ---- several entries: ⌘/Ctrl-click toggles one, Shift-click takes the range from the last click
+
+  click(path, entry, e, cx) {
+    const m = e?.modifiers ?? {};
+    if (m.platform || m.control) {
+      if (this.selected.has(path)) this.selected.delete(path); else this.selected.add(path);
+      this.anchor = path; this.manyTrash = false; cx.notify(); return;
+    }
+    if (m.shift && this.anchor && this.visible.includes(this.anchor)) {
+      const a = this.visible.indexOf(this.anchor), b = this.visible.indexOf(path);
+      for (const p of this.visible.slice(Math.min(a, b), Math.max(a, b) + 1)) this.selected.add(p);
+      this.manyTrash = false; cx.notify(); return;
+    }
+    if (this.selected.size) { this.selected = new Set(); this.manyTrash = false; }
+    this.anchor = path;
+    this.open(path, entry, cx);
+  }
+
+  // The selection without entries inside a selected folder (they go with it).
+  picked() {
+    const all = [...this.selected];
+    return all.filter(p => !all.some(q => q !== p && p.startsWith(q + "/")));
+  }
+
+  clearSelection(cx) { this.selected = new Set(); this.manyTrash = false; cx.notify(); }
+
+  // Copy / Move remember the entries; Paste puts them into a folder of the same machine.
+  remember(mode, cx) {
+    this.clip = { mode, on: this.on ?? null, paths: this.picked().map(p => `${this.root}/${p}`) };
+    this.clearSelection(cx);
+  }
+
+  paste(folder, cx) {
+    const clip = this.clip;
+    if (!clip) return;
+    if ((clip.on ?? null) !== (this.on ?? null)) { this.opError = `Paste works on the machine the entries are on (${clip.on ?? "this computer"}); use Download or drop files instead`; this.menu = null; cx.notify(); return; }
+    const dst = folder ? `${this.root}/${folder}` : this.root, context = this.context, on = this.on;
+    if (folder && !this.folders.has(folder)) this.toggle(folder, cx);
+    this.menu = null; this.busy = clip.mode === "move" ? "Moving…" : "Copying…"; cx.notify();
+    cx.spawn(async cx => {
+      try {
+        const r = await exec("sh", ["-c", MANY[clip.mode], "files", dst, ...clip.paths], { on, timeout: 600000 });
+        if (r.code !== 0) throw new Error((r.stderr || r.stdout || `${clip.mode} failed`).trim());
+        if (clip.mode === "move") this.clip = null;
+        if (!this.current(context)) return;
+        this.opError = null;
+        const touched = new Set([folder, ...clip.paths.filter(p => p.startsWith(this.root + "/")).map(p => parentOf(p.slice(this.root.length + 1)))]);
+        for (const f of touched) if (!f || this.folders.has(f)) await this.loadFolder(f, context).catch(() => null);
+        this.refresh(cx);
+      } catch (e) { if (this.current(context)) this.opError = String(e.message ?? e); }
+      finally { this.busy = null; cx.notify(); }
+    });
+  }
+
+  trashMany(cx) {
+    const paths = this.picked(), context = this.context, on = this.on;
+    this.manyTrash = false; this.busy = "Moving to the Trash…"; cx.notify();
+    cx.spawn(async cx => {
+      const failed = [];
+      for (const p of paths) {
+        try {
+          const r = await exec("sh", ["-c", OPS.trash, "files", `${this.root}/${p}`], { on });
+          if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
+          for (const f of [...this.folders]) if (f === p || f.startsWith(p + "/")) { this.folders.delete(f); this.entries.delete(f); }
+        } catch (e) { failed.push(`${baseOf(p)}: ${String(e.message ?? e)}`); }
+      }
+      if (!this.current(context)) return;
+      this.selected = new Set(); this.busy = null;
+      this.opError = failed.length ? failed.join(" · ") : null;
+      for (const f of new Set(paths.map(parentOf))) if (!f || this.folders.has(f)) await this.loadFolder(f, context).catch(() => null);
+      this.refresh(cx);
+      cx.notify();
+    });
+  }
+
+  // Above the tree while entries are selected or remembered for Paste.
+  selectionBar(t) {
+    const n = this.selected.size, files = this.picked().filter(p => !this.isDir(p));
+    const b = (key, label, fn, tone) => this.button(`fs-${key}`, label, fn, t, tone);
+    const bar = v_flex().id("files-selection").flex_none().gap(5).mb(4).px(8).py(6).rounded(7).bg(t.raised).text_size(12);
+    if (n) bar.child(h_flex().gap(5).flex_wrap().items_center()
+      .child(div().flex_none().text_color(t.muted).child(`${n} selected`))
+      .child(div().flex_1())
+      .child(b("copy", "Copy", cx => this.remember("copy", cx)))
+      .child(b("move", "Move", cx => this.remember("move", cx)))
+      .when(Boolean(this.on) && files.length > 0, el => el.child(b("download", `Download${files.length < n ? ` ${files.length} files` : ""}`, cx => { for (const p of files) this.downloadFile(p, cx); this.clearSelection(cx); })))
+      .child(b("path", "Copy path", cx => { cx.write_to_clipboard(this.picked().map(p => `${this.root}/${p}`).join("\n")); this.clearSelection(cx); }))
+      .child(b("trash", "Move to Trash", cx => { this.manyTrash = true; cx.notify(); }, "danger"))
+      .child(b("clear", "✕", cx => this.clearSelection(cx))));
+    if (n && this.manyTrash) bar.child(h_flex().gap(6).items_center()
+      .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(`Move ${this.picked().length === 1 ? `“${baseOf(this.picked()[0])}”` : `${this.picked().length} items`} to the Trash?`))
+      .child(b("trash-yes", "Move", cx => this.trashMany(cx), "danger"))
+      .child(b("trash-no", "Cancel", cx => { this.manyTrash = false; cx.notify(); })));
+    if (this.clip) bar.child(h_flex().gap(5).items_center()
+      .child(div().flex_1().min_w(0).truncate().text_color(t.dim)
+        .child(`${this.clip.paths.length} to ${this.clip.mode === "move" ? "move" : "copy"}${(this.clip.on ?? null) !== (this.on ?? null) ? ` (from ${this.clip.on ?? "this computer"})` : ""} · into a subfolder: right-click it → Paste here`))
+      .child(b("paste-root", `Paste into ${baseOf(this.root ?? "") || "/"}`, cx => this.paste("", cx), "primary"))
+      .child(b("clip-x", "✕", cx => { this.clip = null; cx.notify(); })));
+    if (this.busy) bar.child(div().text_color(t.dim).child(this.busy));
+    return bar;
+  }
+
+  isDir(path) {
+    return (this.entries.get(parentOf(path)) ?? []).some(e => e.name === baseOf(path) && e.dir);
+  }
+
   trash(path, cx) {
     this.fileOp("trash", [`${this.root}/${path}`], [parentOf(path)], cx, () => {
       for (const folder of [...this.folders]) if (folder === path || folder.startsWith(path + "/")) {
@@ -408,6 +524,7 @@ export default class Files extends View {
       .when(!dir && Boolean(this.on), el => el.child(b("download", "Download", cx => { this.menu = null; this.downloadFile(path, cx); })))
       .when(!dir && HTML.test(path), el => el.child(b("edit", "Edit", cx => { this.menu = null; this.show(path, cx); cx.notify(); })))
       .when(path !== "", el => el.child(b("rename", "Rename", cx => this.startEdit("rename", path, dir, cx))))
+      .when(dir && Boolean(this.clip), el => el.child(b("paste", "Paste here", cx => this.paste(path, cx), "primary")))
       .child(b("file", "New file", cx => this.startEdit("file", path, dir, cx)))
       .child(b("folder", "New folder", cx => this.startEdit("folder", path, dir, cx)))
       .when(path !== "", el => el.child(b("trash", "Move to Trash", cx => { this.menu = null; this.trashing = path; cx.notify(); }, "danger")))
@@ -443,11 +560,12 @@ export default class Files extends View {
         if (entry.dir && open) this.rows(path, depth + 1, out, t);
         continue;
       }
-      const picked = this.menu?.path === path || this.trashing === path;
+      this.visible.push(path);
+      const picked = this.menu?.path === path || this.trashing === path || this.selected.has(path);
       out.push(h_flex().id(`file-${path}`).h(28).flex_none().pl(8 + depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer().hover(s => s.bg(t.hover))
         .when(picked, el => el.bg(t.selected))
         .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.openMenu(path, entry.dir, cx); })
-        .on_click((_e, cx) => this.open(path, entry, cx))
+        .on_click((e, cx) => this.click(path, entry, e, cx))
         .on_drop((e, cx) => { cx.stop_propagation(); this.drop(e.paths, entry.dir ? path : prefix, cx); })
         .child(entry.dir ? svg(`mods/files-plus/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
         .child(svg(`mods/files-plus/${entry.dir ? "folder" : "file"}.svg`).size(14).flex_none().text_color(t.muted))
@@ -488,7 +606,8 @@ export default class Files extends View {
         .when(Boolean(this.opError), el => el.child(h_flex().id("files-op-error").flex_none().gap(6).p(8).items_start().text_size(12).text_color(t.ansi1)
           .child(div().flex_1().min_w(0).child(this.opError))
           .child(div().id("files-op-error-x").cursor_pointer().text_color(t.dim).on_click((_e, cx) => { this.opError = null; cx.notify(); }).child("✕"))))
-        .children(this.rows("", 0, [], t))
+        .when(this.selected.size > 0 || Boolean(this.clip), el => el.child(this.selectionBar(t)))
+        .children((this.visible = [], this.rows("", 0, [], t)))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))))
       .when(Boolean(this.file) && Boolean(this.leaving), el => el.child(h_flex().id("files-leave").flex_none().gap(6).px(14).py(6).items_center().border_b(1).border_color(t.border)

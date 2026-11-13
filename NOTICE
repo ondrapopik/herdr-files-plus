@@ -16,6 +16,7 @@ Changes to `files` (now `files-plus`):
 - ⤢ opens the preview (Markdown, diagram, PDF) in a big read-only window
 - PDF files show their first page, with Open for the whole document
 - right-click menu: rename, new file, new folder, move to the Trash
+- several entries at once (⌘ / Shift-click): copy, move, download, copy paths, move to the Trash
 - text files are editable and saved, also on another machine
 
 Changes to `image-viewer` (now `image-viewer-plus`):

@@ -98,6 +98,17 @@ A click on:
   shows that one file read-only: header with ← (back through links followed in it), the file name,
   `Source` / `Preview`, `Open` for a PDF, ✕ (`closeOverlay(props().overlay)`); Markdown in a
   centered column at most 900 px wide, 15 px text; pictures fit that column.
+- **Several entries**: ⌘ / Ctrl-click toggles one into `selected` (a set of relative paths, kept
+  per tab in `saved`), Shift-click adds the range between the last click and this one in the shown
+  order; a plain click clears it and opens as before. Selected rows use `t.selected`. A bar above the
+  tree (`t.raised`, 12px): `N selected`, `Copy`, `Move`, `Download` (another machine, files only,
+  queued one by one), `Copy path` (absolute paths, one per line, `cx.write_to_clipboard`), `Move to
+  Trash` (asks `Move N items to the Trash?`), `✕`. Entries inside a selected folder go with it.
+  Copy / Move keep `{ mode, on, paths }` (also across tabs); the bar then shows `N to move`, `Paste
+  into <root>` and `✕`, and a folder's right-click menu gets `Paste here`. Paste runs one `sh`
+  script on the machine: it checks every name first (`already exists there`), refuses a folder into
+  itself, `cp -R` or `mv`; a move into the folder the entries are already in says so. Pasting on
+  another machine than the entries' is refused. Entries that vanish leave the selection.
 - **a PDF** renders its first page here: copied first from another machine (with progress), then
   `qlmanage -t -s 1600` on macOS or `pdftoppm -png -r 110 -f 1 -l 1` elsewhere. The page count is
   a best guess (`/Type /Page` objects); `Open` hands the local copy to `open` / `xdg-open`.
@@ -221,4 +232,6 @@ file, New folder (inside a folder, or beside a file), Move to Trash (`/usr/bin/t
 - A relative link in the Markdown opens the linked file in the panel.
 - ⤢ on an open `README.md` shows it in a big dialog with the text in a centered column; ✕ closes it.
 - Right-click → Rename, New file, New folder and Move to Trash work, here and on another machine.
+- ⌘-click two files and Shift-click a third: `3 selected`; Move, then right-click a folder → Paste
+  here moves them there; Copy and Paste again says `already exists there`.
 - Saving a file that changed on disk since it was opened is refused with `Reload from disk`.

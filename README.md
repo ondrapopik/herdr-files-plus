@@ -42,6 +42,11 @@ See [files-plus/RECIPE.md](files-plus/RECIPE.md) for how it is built.
   (beside it). On another machine they go over in 7 MiB chunks, 6 at once; here they are copied (folders
   too). Nothing is overwritten. Transfers run one at a time, the bar shows `↓` / `↑` and how many
   wait.
+- **Several at once**: ⌘-click (Ctrl-click) adds or removes an entry, Shift-click takes the range;
+  a bar above the tree offers **Copy**, **Move**, **Download** (files of another machine), **Copy
+  path** and **Move to Trash** (asks first). After Copy / Move, right-click a folder → **Paste
+  here** (or **Paste into <top folder>** in the bar); it works within one machine, and nothing is
+  overwritten. The selection is kept per tab.
 - **Right-click** a file or folder (or the empty area, or **+**): Download, Rename, New file, New folder,
   Move to Trash (macOS `trash`, `gio trash` or `trash-cli` on Linux).
 - **Editing**: text files up to 1 MiB are editable and saved with ⌘S / Ctrl+S, also on another
