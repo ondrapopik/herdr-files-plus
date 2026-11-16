@@ -21,7 +21,18 @@ UI font at 13px.
    then `Files`, the file's path, a `●` in `t.blocked` when there are unsaved edits, and buttons:
    `Source` / `Preview` (Markdown only), `Save` (primary while dirty, `Saving…` while saving), or
    `read-only` in 11px `t.dim` when the file can't be saved.
-2. **Body**, one of:
+   In the tree, `⌕` before `+` (`t.accent` while the search is open).
+2. **Search** (while open), under the header, bottom border: an input (26px, `t.accent` border,
+   `Search this folder…`), `✕`, then `Names` / `Contents` (the active one primary) and a status in
+   11px `t.dim` right aligned: `1,234 entries`, `12 matches`, `No matching names`,
+   `Reading the file list…`; `Type at least 2 characters`, `Searching…`,
+   `57 lines in 12 files · rg`, `No matches · git grep`; an error in `t.ansi1`.
+   With something typed the results replace the tree rows: **Names**: 28px rows, icon, the name
+   with the matched words in `t.accent` semibold, the parent folder in 11px `t.dim`, the git mark;
+   **Contents**: per file a 26px row (icon, name semibold, folder, number of lines), under it 20px
+   rows with the line number (34px, right aligned, 11px `t.dim`) and the line in the terminal font
+   12px `t.muted`, indentation removed, the match in `t.accent`; at most 600 lines shown.
+3. **Body**, one of:
    - **The tree**: rows 28px, 8px left padding plus 18px per level, a 12px chevron (folders), a
      14px folder or file icon in `t.muted`, the name (truncated), and a git mark on the right
      (`A` in `t.ansi2`, `D` / `U` in `t.ansi1`, `M` in `t.blocked`). The right-clicked row is
@@ -43,11 +54,11 @@ UI font at 13px.
    - **A PDF**: its first page as an image at the pane's width, under it `Page 1 of 3 · Open shows
      every page in your PDF app` in 11px `t.dim`; `Open` in the header. While it loads:
      `Copying from <machine>… 45 %` or `Rendering the first page…`.
-3. **Transfer bar** (while a file is copied between machines), `t.surface` with a top border:
+4. **Transfer bar** (while a file is copied between machines), `t.surface` with a top border:
    `↓` (download, open) or `↑` (upload), the file name, `+2 waiting` when more are queued,
    `42 % · 120 MB / 286 MB · 38 MB/s · 0:04 left` in 11px `t.dim` (or `Preparing…`,
    `Cancelling…`), a `✕` button, and under it a 6px `t.border` track with a `t.accent` fill.
-4. **Audio bar** (while a track is loaded), same style: `▶` / `❚❚` (primary), `−10s`, `+10s`, the
+5. **Audio bar** (while a track is loaded), same style: `▶` / `❚❚` (primary), `−10s`, `+10s`, the
    track name, `1:23 / 4:56` (or `Copying 45 % of 12 MB`), `✕`, and a 6px progress bar: `t.dim`
    fill while copying, `t.accent` while playing.
 
@@ -114,6 +125,30 @@ A click on:
   script on the machine: it checks every name first (`already exists there`), refuses a folder into
   itself, `cp -R` or `mv`; a move into the folder the entries are already in says so. Pasting on
   another machine than the entries' is refused. Entries that vanish leave the selection.
+- **Search** (`⌕`, or ⌘K: `keys.json` `"global": { "cmd-k": "files-plus.search" }`, received with
+  `nextCommand()`; with a file open it opens Find in the file instead; only while the panel is shown): `Names` reads the whole file
+  list once when opened (and again on switching back to Names or to another folder): in a git work
+  tree that is not ignored `git ls-files -z --cached --others --exclude-standard` (folders derived
+  from the paths), else `find` pruning `.git` and `node_modules`; at most 6 MB of output and 50,000
+  entries. Each key filters it: every word of the query must be in the path (any case); names that
+  hold them all first, then names starting with the first word, then shorter paths; 300 shown.
+  Enter opens the first. A file opens as a click in the tree would; a folder opens in the tree with
+  its parents and the search closes. `Contents` runs 400 ms after the last key (Enter at once), from
+  2 characters: `rg -i -F --max-count 20 --max-filesize 5M`, else `git grep -n -I -i -F --untracked`,
+  else `grep -rnI -i -F -m 20` without `.git` / `node_modules`; at most 2,000 lines, each cut to 600
+  characters (`/opt/homebrew/bin` and `/usr/local/bin` are added to `PATH`). A line opens the file's
+  source (also for Markdown) with the match selected and the keyboard in the editor; ← returns to
+  the results. Esc or `✕` closes the search. Not on Windows (no `sh`).
+- **Find in a file** (`⌕` in the file's header, also in the big window, ⌘K, or ⌘F / Ctrl+F inside
+  the panel): a bar under the header with an input, `3 / 12` (`No matches` in `t.ansi1`), `‹`, `›`, `✕`.
+  Any case, at most 5,000 matches. Enter / `›` next, Shift+Enter / `‹` previous, Esc closes. Source:
+  the match is selected (`set_selected_range`). Preview: while finding, text parts are cut at blank
+  lines outside fences (`splitBlocks`; each part keeps its source `line` from `mdParts`), every
+  block is a direct child of the scroll area, and `ScrollHandle.scroll_to_item` brings the block
+  holding the match's line into view, its background `t.selected`.
+  `files-plus.search` reaches every shown copy, so the big window sets `shared("files-plus.viewer")`
+  to its id while open (cleared in `close()`, and by the panel when it starts) and the panel ignores
+  the command meanwhile; otherwise the panel's Find takes the keyboard.
 - **a PDF** renders its first page here: copied first from another machine (with progress), then
   `qlmanage -t -s 1600` on macOS or `pdftoppm -png -r 110 -f 1 -l 1` elsewhere. The page count is
   a best guess (`/Type /Page` objects); `Open` hands the local copy to `open` / `xdg-open`.
@@ -164,6 +199,8 @@ file, New folder (inside a folder, or beside a file), Move to Trash (`/usr/bin/t
   first page), `renderDiagrams` (runs `diagrams.mjs` with a job file), `openVideo`, `openInBrowser`, `Player` (the audio bar), `newDownload` / `downloadView` (the
   transfer bar), `sweepCache`. The queue (`enqueue`, `next`) and `drop` live in `main.js`;
   drops arrive through `.on_drop(e => e.paths)` on the tree and on each row.
+- `mods/files-plus/search.js`: `listAll` (the file list), `matchNames` (the filter),
+  `grepContents` (rg / git grep / grep, parsed as `path:line:text`), `highlight`, `excerpt`.
 - `mods/files-plus/diagrams.mjs`: a Node.js script (no packages) that drives Chrome over the
   DevTools protocol (`Target.createTarget`, `Runtime.evaluate` of `draw(kind, source)`,
   `Page.captureScreenshot` with a clip and a transparent background) and prints `{ results }`.
@@ -172,7 +209,7 @@ file, New folder (inside a folder, or beside a file), Move to Trash (`/usr/bin/t
   `file` (Linux) or `System.Drawing` (Windows), deletes the copy on close.
 - Programs: `sh`, `git`, `stat`, `hc exec --on <machine> -- dd`, `dd … | hc exec --on <machine>
   -i -- sh -c 'cat >> …'`, `cp`, `open` / `xdg-open`, `qlmanage` / `pdftoppm`, `sips` / `file`, `ffplay`, `ffprobe`,
-  `kill`, `find`, `trash` / `gio` / `trash-put`, `sips` / `file`, `node` + Chrome (diagrams).
+  `kill`, `find`, `rg` / `git grep` / `grep` (search), `trash` / `gio` / `trash-put`, `sips` / `file`, `node` + Chrome (diagrams).
 - Icons: `chevron-down.svg`, `chevron-right.svg`, `file.svg`, `folder.svg` (14px / 12px, `svg()`).
 - The layout: the `files` block of a cloned `main` layout points at `files-plus`.
 
@@ -239,4 +276,10 @@ file, New folder (inside a folder, or beside a file), Move to Trash (`/usr/bin/t
 - Right-click → Rename, New file, New folder and Move to Trash work, here and on another machine.
 - ⌘-click two files and Shift-click a third: `3 selected`; Move, then right-click a folder → Paste
   here moves them there; Copy and Paste again says `already exists there`.
+- ⌕, type `main js`: `main.js` files are listed first with the words highlighted; a click opens one.
+- `Contents`, type a word from a file: its lines are listed under the file; a click opens the source
+  with the word selected; ← shows the results again. The same works on another machine.
+- ⌘K with the panel shown opens the search in the tree, Find with a file open.
+- An open Markdown file, ⌘F, a word from its end: `1 / n`, the preview scrolls to that paragraph;
+  › moves on; in Source the word is selected.
 - Saving a file that changed on disk since it was opened is refused with `Reload from disk`.

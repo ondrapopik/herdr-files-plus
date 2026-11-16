@@ -50,6 +50,16 @@ See [files-plus/RECIPE.md](files-plus/RECIPE.md) for how it is built.
   path** and **Move to Trash** (asks first). After Copy / Move, right-click a folder → **Paste
   here** (or **Paste into <top folder>** in the bar); it works within one machine, and nothing is
   overwritten. The selection is kept per tab.
+- **Search**: ⌕ in the header (or ⌘K, see Installation) opens a search field above the tree. **Names**
+  filters every file and folder under the panel's folder as you type (all words must appear in the
+  path; git's file list without ignored files, else `find` without `.git` and `node_modules`; up to
+  50,000 entries); a click opens the file, or the folder in the tree. **Contents** searches inside
+  the files (`rg`, else `git grep`, else `grep`; literal text, any case, up to 2,000 lines) and lists
+  the lines by file with the match highlighted; a click opens the file's source with the match
+  selected, ← goes back to the results. Works on another machine too. Esc closes it.
+- **Find in a file**: with a file open, ⌕ in its header (or ⌘K, or ⌘F / Ctrl+F) finds text in it: `3 / 12`,
+  Enter or › for the next match, Shift+Enter or ‹ back. In the source the match is selected; in the
+  Markdown preview the paragraph with it scrolls into view, highlighted.
 - **Right-click** a file or folder (or the empty area, or **+**): Download, Rename, New file, New folder,
   Move to Trash (macOS `trash`, `gio trash` or `trash-cli` on Linux).
 - **Editing**: text files up to 1 MiB are editable and saved with ⌘S / Ctrl+S, also on another
@@ -70,7 +80,12 @@ Ask your agent to add this mod (it reads every file first), or do it by hand:
    ```sh
    herdr-app do layout.switch --name main-plus
    ```
-3. Check both mods:
+3. For ⌘K (search the folder), add to the `"global"` section of `~/.config/herdr-app/keys.json`:
+   ```json
+   "cmd-k": "files-plus.search",
+   ```
+   It works while the Files panel is shown (Herdr delivers mod commands to shown mods only).
+4. Check both mods:
    ```sh
    herdr-app check ~/.config/herdr-app/mods/files-plus
    herdr-app check ~/.config/herdr-app/mods/image-viewer-plus

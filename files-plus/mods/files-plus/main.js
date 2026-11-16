@@ -5,11 +5,14 @@
 // files-plus: copies from another machine show a progress bar at the bottom; Markdown opens as a rendered preview.
 // files-plus: right-click → Download saves a file of another machine to ~/Downloads; files dropped on the panel are uploaded.
 // files-plus: the Markdown preview shows its local images; a PDF shows its first page.
+// files-plus: ⌕ (or ⌘K through keys.json: "cmd-k": "files-plus.search") searches the folder by file name or by content (search.js).
+// files-plus: with a file open, ⌕ (or ⌘F / Ctrl+F) finds in it; the preview scrolls to the paragraph with the match.
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, Editor, EditorState, InputState, Input, TextView } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, openOverlay, closeOverlay, props, notify, home } from "herdr";
+import { v_flex, h_flex, Editor, EditorState, InputState, Input, TextView, ScrollHandle } from "gpui-base";
+import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, openOverlay, closeOverlay, props, notify, home, nextCommand, shared, setShared } from "herdr";
 import { Buffer } from "buffer";
 import { Player, AUDIO, VIDEO, HTML, openVideo, openInBrowser, sweepCache, newDownload, downloadView, download, upload, stageImage, pdfPreview, renderDiagrams } from "./media.js";
+import { listAll, matchNames, grepContents, highlight, excerpt, MAX_LINES } from "./search.js";
 
 const IMAGE = /\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?)$/i;
 const MARKDOWN = /\.(md|markdown|mdown|mkd)$/i;
@@ -18,6 +21,7 @@ const DIAGRAM_FILE = /\.(bpmn|mmd|mermaid)$/i;
 const PREVIEWABLE = /\.(md|markdown|mdown|mkd|bpmn|mmd|mermaid)$/i;
 // The viewer window: the panel's preview on its own, in a big dialog (props { view, root, file, on }).
 const VIEW_WIDTH = 900; // the reading column at most, in px
+const VIEWER_OPEN = "files-plus.viewer"; // shared(): the open viewer window's id, null when closed
 const PDF = /\.pdf$/i;
 // ![alt](src "title"), also wrapped in a link [![alt](src)](href), or <img src="…">
 const IMG = /\[?!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+["'][^"']*["'])?\s*\)(?:\]\([^)]*\))?|<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi;
@@ -31,16 +35,19 @@ const isDark = t => { const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.ex
 // TextView draws no images, so the Markdown is split into text, local images and diagrams, in order.
 // Images from the web stay in the text as their alt text. ```mermaid and ```bpmn blocks become
 // { diagram, source }; other fenced code (also ```` blocks quoting a ``` block) stays text.
+// Every part has `line`: the 0-based source line it starts on (for Find).
 function mdParts(text) {
   const parts = [];
-  let buf = [], fence = null, diagram = null;
-  const flush = () => { if (buf.length) { parts.push({ text: buf.join("\n") }); buf = []; } };
+  let buf = [], fence = null, diagram = null, start = 0, n = -1;
+  const flush = () => { if (buf.length) { parts.push({ text: buf.join("\n"), line: start }); buf = []; } start = n + 1; };
   for (const line of text.split("\n")) {
+    n++;
+    if (!buf.length && !diagram) start = n;
     if (fence) {
       const c = line.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
       if (c && c[1][0] === fence[0] && c[1].length >= fence.length) {
         fence = null;
-        if (diagram) { parts.push({ diagram: diagram.kind, source: diagram.lines.join("\n") }); diagram = null; continue; }
+        if (diagram) { parts.push({ diagram: diagram.kind, source: diagram.lines.join("\n"), line: diagram.line }); diagram = null; continue; }
       }
       if (diagram) diagram.lines.push(line); else buf.push(line);
       continue;
@@ -49,7 +56,7 @@ function mdParts(text) {
     if (f) {
       fence = f[1];
       const kind = f[2].toLowerCase();
-      if (kind === "mermaid" || kind === "bpmn") { flush(); diagram = { kind, lines: [] }; } else buf.push(line);
+      if (kind === "mermaid" || kind === "bpmn") { flush(); diagram = { kind, lines: [], line: n }; } else buf.push(line);
       continue;
     }
     if (!line.includes("![") && !/<img/i.test(line)) { buf.push(line); continue; }
@@ -59,14 +66,37 @@ function mdParts(text) {
       pending += line.slice(last, m.index); last = m.index + m[0].length;
       if (WEB.test(src)) { pending += alt; continue; }
       if (pending.trim()) buf.push(pending);
-      pending = ""; flush(); parts.push({ image: src, alt }); any = true;
+      pending = ""; flush(); parts.push({ image: src, alt, line: n }); any = true;
     }
     pending += line.slice(last);
     if (!any || pending.trim()) buf.push(pending);
   }
-  if (diagram) buf.push("```" + diagram.kind, ...diagram.lines); // never closed: show it as code
+  if (diagram) { start = diagram.line; buf.push("```" + diagram.kind, ...diagram.lines); } // never closed: show it as code
   flush();
   return parts;
+}
+
+// Text parts cut at blank lines outside code fences, so the preview can scroll to the paragraph with a match.
+function splitBlocks(parts) {
+  const out = [];
+  for (const p of parts) {
+    if (p.text === undefined) { out.push(p); continue; }
+    let buf = [], start = p.line, fence = null;
+    p.text.split("\n").forEach((l, k) => {
+      if (fence) {
+        const c = l.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+        if (c && c[1][0] === fence[0] && c[1].length >= fence.length) fence = null;
+      } else {
+        const o = l.match(/^ {0,3}(`{3,}|~{3,})/);
+        if (o) fence = o[1];
+        else if (!l.trim()) { if (buf.length) out.push({ text: buf.join("\n"), line: start }); buf = []; return; }
+      }
+      if (!buf.length) start = p.line + k;
+      buf.push(l);
+    });
+    if (buf.length) out.push({ text: buf.join("\n"), line: start });
+  }
+  return out;
 }
 
 function location() {
@@ -161,18 +191,39 @@ export default class Files extends View {
     this.player = new Player();
     this.transfer = null; this.queue = [];
     this.mdImages = new Map(); this.diagrams = new Map(); this.pdf = null;
+    this.previewScroll = ScrollHandle.new(); this.find = null;
     const p = props() ?? {};
     if (p.view) {
       // The viewer: one file, read-only, no tree; links open in it, ← goes back.
       this.viewer = true; this.history = [];
       this.root = p.root; this.on = p.on ?? null; this.context = { key: "viewer", cwd: p.root, on: this.on };
       this.show(p.file, cx);
+      // ⌘K reaches every shown copy: while this window is open the panel leaves it to the window.
+      this.viewerId = `${Date.now()}-${Math.random()}`;
+      setShared(VIEWER_OPEN, this.viewerId);
+      this.commands(cx);
       return;
     }
+    if (shared(VIEWER_OPEN)) setShared(VIEWER_OPEN, null); // left over when the app quit with the window open
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
     cx.timer.every(1000, cx => { this.player.tick(cx); if (this.transfer) cx.notify(); }); // only does work while a track plays or a copy runs
     cx.spawn(async () => { await sweepCache(); });
+    this.commands(cx);
+  }
+
+  // "files-plus.search" (bound to ⌘K in keys.json): Find in the open file, else the folder search.
+  commands(cx) {
+    cx.spawn(async cx => {
+      for (;;) {
+        const c = await nextCommand();
+        if (c !== "search") continue;
+        if (!this.viewer && shared(VIEWER_OPEN)) continue;
+        if (this.file) { if (this.code) this.openFind(cx); }
+        else if (!this.viewer) this.openSearch(cx);
+        cx.notify();
+      }
+    });
   }
 
   watch(root, cx) {
@@ -211,6 +262,7 @@ export default class Files extends View {
       this.menu = null; this.edit = null; this.trashing = null; this.opError = null;
       this.loading = false;
       if (saved?.file) this.show(saved.file, cx, saved.draft);
+      if (this.search) { this.search.list = null; this.search.result = null; this.runSearch(cx); }
     }
     if (!cwd || this.loading) return;
     const context = this.context;
@@ -261,11 +313,12 @@ export default class Files extends View {
   }
 
   // draft: unsaved edits kept from an earlier visit ({ path, text, original, stamp })
-  show(path, cx, draft) {
+  // at: { line, query } from a content search: opens the source with the match selected
+  show(path, cx, draft, at) {
     this.code?.release(); this.code = null; this.file = path; this.fileError = null;
     this.original = null; this.stamp = null; this.editable = false; this.dirty = false;
     this.saving = false; this.saveError = null; this.saveNote = null; this.leaving = null;
-    this.preview = Boolean(path) && PREVIEWABLE.test(path);
+    this.preview = Boolean(path) && PREVIEWABLE.test(path) && !at;
     this.pdf = null; this.mdImages = new Map(); this.diagrams = new Map();
     if (!path || !cx) return;
     if (PDF.test(path)) return this.loadPdf(path, cx);
@@ -290,6 +343,7 @@ export default class Files extends View {
         this.dirty = resume !== null && resume !== text;
         if (draft?.path === path && resume === null) this.saveNote = "The file changed on disk; your unsaved edits were dropped";
         const code = this.code;
+        if (at) this.reveal(code, at, cx);
         this.loadMdImages(cx);
         code.on("change", (_e, cx) => {
           if (this.code !== code) return;
@@ -607,6 +661,10 @@ export default class Files extends View {
     // The theme turned light or dark: draw the diagrams again in its style.
     if (this.code && this.preview && PREVIEWABLE.test(this.file ?? "") && this.diagramsDark !== isDark(t)) { this.diagramsDark = isDark(t); this.loadDiagrams(cx); }
     return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
+      .on_key_down((e, cx) => {
+        if (e.key !== "f" || !(e.modifiers?.platform || e.modifiers?.control) || e.modifiers?.shift || e.modifiers?.alt) return;
+        if (this.file && this.code) { cx.stop_propagation(); this.openFind(cx); }
+      })
       .when(Boolean(this.viewer), el => el.child(this.viewerHeader(t)))
       .when(!this.viewer, el => el.child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .when(Boolean(this.file), el => el.child(div().id("files-back").w(20).cursor_pointer().text_color(t.muted)
@@ -614,14 +672,19 @@ export default class Files extends View {
         .child(div().font_semibold().child("Files"))
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.file ?? this.root?.split(/[\\/]/).pop() ?? ""))
         .when(Boolean(this.file) && this.dirty, el => el.child(div().flex_none().text_color(t.blocked).child("●")))
+        .when(Boolean(this.file) && Boolean(this.code), el => el.child(this.findButton("files-find-open", t)))
         .when(Boolean(this.file) && Boolean(this.code) && PREVIEWABLE.test(this.file ?? ""), el => el.child(this.button("files-md-mode", this.preview ? "Source" : "Preview", cx => { this.preview = !this.preview; this.loadMdImages(cx); cx.notify(); }, t)))
         .when(this.pdf?.status === "ready", el => el.child(this.button("files-pdf-open", "Open", () => { exec(window()?.platform === "macos" ? "open" : "xdg-open", [this.pdf.local]).catch(() => null); }, t)))
         .when(Boolean(this.file) && this.editable, el => el.child(this.button("files-save", this.saving ? "Saving…" : "Save", cx => this.save(cx), t, this.dirty ? "primary" : undefined)))
         .when(Boolean(this.file) && Boolean(this.code) && !this.editable, el => el.child(div().flex_none().text_size(11).text_color(t.dim).child("read-only")))
+        .when(!this.file && Boolean(this.root), el => el.child(div().id("files-search-open").w(20).flex_none().text_center().cursor_pointer().text_color(this.search ? t.accent : t.muted).hover(s => s.text_color(t.foreground))
+          .tooltip("Search names or contents (⌘K)").on_click((_e, cx) => this.search ? this.closeSearch(cx) : this.openSearch(cx)).child("⌕")))
         .when(!this.file && Boolean(this.root), el => el.child(div().id("files-new").w(20).flex_none().text_center().cursor_pointer().text_color(t.muted).hover(s => s.text_color(t.foreground))
           .on_click((_e, cx) => this.menu?.path === "" ? this.closeEditing(cx) : this.openMenu("", true, cx)).child("+")))
         .when(Boolean(this.file) && (PREVIEWABLE.test(this.file ?? "") || PDF.test(this.file ?? "")), el => el.child(div().id("files-expand").w(20).flex_none().text_center().cursor_pointer().text_color(t.muted).hover(s => s.text_color(t.foreground))
           .tooltip("Open the preview in a big window").on_click(() => this.expand()).child("⤢")))))
+      .when(!this.file && !this.viewer && Boolean(this.search), el => el.child(this.searchBar(t)))
+      .when(Boolean(this.file) && Boolean(this.code) && Boolean(this.find), el => el.child(this.findBar(t)))
       .when(!this.file && !this.viewer, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6)
         .on_drop((e, cx) => this.drop(e.paths, "", cx))
         .on_mouse_down("right", (_e, cx) => this.openMenu("", true, cx))
@@ -630,9 +693,9 @@ export default class Files extends View {
           .child(div().flex_1().min_w(0).child(this.opError))
           .child(div().id("files-op-error-x").cursor_pointer().text_color(t.dim).on_click((_e, cx) => { this.opError = null; cx.notify(); }).child("✕"))))
         .when(this.selected.size > 0 || Boolean(this.clip), el => el.child(this.selectionBar(t)))
-        .children((this.visible = [], this.rows("", 0, [], t)))
-        .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
-        .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))))
+        .children((this.visible = [], this.searching() ? this.searchRows(t) : this.rows("", 0, [], t)))
+        .when(!this.searching() && (Boolean(this.error) || !this.entries.get("")?.length), el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
+        .when(this.limited && !this.searching(), el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))))
       .when(Boolean(this.file) && Boolean(this.leaving), el => el.child(h_flex().id("files-leave").flex_none().gap(6).px(14).py(6).items_center().border_b(1).border_color(t.border)
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child("Unsaved changes"))
         .child(this.button("files-leave-save", "Save", cx => this.save(cx), t, "primary"))
@@ -648,11 +711,9 @@ export default class Files extends View {
           .when(this.pdf.status === "ready", el => el.child(div().text_size(11).text_color(t.dim)
             .child(`Page 1${this.pdf.pages ? ` of ${this.pdf.pages}` : ""} · Open shows ${this.pdf.pages === 1 ? "it" : "every page"} in your PDF app`)))
         : this.code && this.preview
-        ? v_flex().id("files-markdown").flex_1().min_h(0).overflow_y_scrollbar().on_size_change((size, cx) => this.measure(size, cx))
-          .child(v_flex().w_full().when(Boolean(this.viewer), el => el.max_w(VIEW_WIDTH).mx_auto().py(12)).px(16).py(12).text_size(this.viewer ? 15 : 13)
-            .children(this.previewParts().map((part, i) => part.text !== undefined
-              ? TextView.markdown(`files-md-${this.file}-${i}`, part.text).selectable(true).on_link_click((url, cx) => this.followLink(url, cx))
-              : part.diagram ? this.mdDiagram(part, i, t) : this.mdImage(part, i, t))))
+        ? v_flex().id("files-markdown").flex_1().min_h(0).overflow_y_scrollbar().track_scroll(this.previewScroll).py(12).text_size(this.viewer ? 15 : 13)
+          .on_size_change((size, cx) => this.measure(size, cx))
+          .children(this.previewBlocks(t))
         : this.code
         ? v_flex().id("files-editor").flex_1().min_h(0)
           .on_key_down((e, cx) => {
@@ -662,6 +723,273 @@ export default class Files extends View {
         : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")))
       .when(Boolean(this.transfer), el => el.child(downloadView(this.transfer, t, (...a) => this.button(...a), cx => { this.transfer.cancelled = true; cx.notify(); }, this.queue.length)))
       .when(this.player.active, el => el.child(this.player.view(t, (...a) => this.button(...a))));
+  }
+
+  // ---- find in the open file: ⌕ / ⌘F, Enter (Shift+Enter back), ‹ ›, Esc
+
+  findButton(id, t) {
+    return div().id(id).w(20).flex_none().text_center().cursor_pointer().text_color(this.find ? t.accent : t.muted).hover(s => s.text_color(t.foreground))
+      .tooltip("Find in this file (⌘K)").on_click((_e, cx) => this.find ? this.closeFind(cx) : this.openFind(cx)).child("⌕");
+  }
+
+  openFind(cx) {
+    if (this.find) { this.find.input.focus(); return; }
+    const input = InputState.new({ placeholder: "Find in this file…" });
+    const f = this.find = { input, index: 0, q: null, text: null, matches: [] };
+    input.on("change", (_e, cx) => { f.index = 0; this.findGo(0, cx); });
+    input.on("submit", (e, cx) => this.findGo(e?.shift ? -1 : 1, cx));
+    input.focus();
+    cx.timer.after(50, () => { if (this.find === f) input.focus(); });
+    cx.notify();
+  }
+
+  closeFind(cx) {
+    this.find?.input.release(); this.find = null; this.findScroll = false;
+    cx.notify();
+  }
+
+  // Offsets of the query (any case) in the file's text, at most 5,000; kept until either changes.
+  findMatches() {
+    const f = this.find;
+    if (!f || !this.code) return [];
+    const text = this.code.value(), q = f.input.value();
+    if (f.text === text && f.q === q) return f.matches;
+    const lower = text.toLowerCase(), ql = q.toLowerCase(), out = [];
+    if (ql) for (let i = lower.indexOf(ql); i >= 0 && out.length < 5000; i = lower.indexOf(ql, i + ql.length)) out.push(i);
+    f.text = text; f.q = q; f.matches = out;
+    if (f.index >= out.length) f.index = 0;
+    return out;
+  }
+
+  // Moves to the next (1), previous (-1) or current (0) match: selected in the source, scrolled to in the preview.
+  findGo(step, cx) {
+    const f = this.find, m = this.findMatches();
+    if (!f) return;
+    if (m.length) {
+      f.index = (f.index + step + m.length) % m.length;
+      if (this.preview) this.findScroll = true;
+      else this.code.set_selected_range({ start: m[f.index], end: m[f.index] + f.input.value().length });
+    }
+    cx.notify();
+  }
+
+  // The source line (0-based) of the current match.
+  findLine() {
+    const m = this.findMatches(), at = m[this.find?.index ?? 0];
+    if (at === undefined) return -1;
+    const text = this.code.value();
+    let line = 0;
+    for (let i = text.indexOf("\n"); i >= 0 && i < at; i = text.indexOf("\n", i + 1)) line++;
+    return line;
+  }
+
+  findBar(t) {
+    const f = this.find, m = this.findMatches(), q = f.input.value();
+    return h_flex().id("files-find").flex_none().gap(5).px(8).py(6).items_center().border_b(1).border_color(t.border)
+      .on_key_down((e, cx) => { if (e.key === "escape") { cx.stop_propagation(); this.closeFind(cx); } })
+      .child(Input.new(f.input).flex_1().min_w(0).h(26).px(6).rounded(6).border_1().border_color(t.accent).bg(t.background).text_size(13).text_color(t.foreground))
+      .child(div().flex_none().text_size(11).text_color(q && !m.length ? t.ansi1 : t.dim)
+        .child(!q ? "" : m.length ? `${f.index + 1} / ${m.length.toLocaleString("en-US")}${m.length >= 5000 ? "+" : ""}` : "No matches"))
+      .child(this.button("files-find-prev", "‹", cx => this.findGo(-1, cx), t))
+      .child(this.button("files-find-next", "›", cx => this.findGo(1, cx), t))
+      .child(this.button("files-find-x", "✕", cx => this.closeFind(cx), t));
+  }
+
+  // The preview's blocks, each a direct child of the scroll area (so Find can scroll to one). While
+  // finding, text is cut into paragraphs and the one with the current match is highlighted.
+  previewBlocks(t) {
+    const finding = Boolean(this.find?.input.value()) && this.findMatches().length > 0;
+    const parts = finding ? splitBlocks(this.previewParts()) : this.previewParts();
+    let current = -1;
+    if (finding) {
+      const line = this.findLine();
+      parts.forEach((p, i) => { if ((p.line ?? 0) <= line) current = i; });
+      if (this.findScroll && current >= 0) { this.previewScroll.scroll_to_item(current); this.findScroll = false; }
+    }
+    return parts.map((part, i) => v_flex().w_full().px(16).when(Boolean(this.viewer), el => el.max_w(VIEW_WIDTH).mx_auto())
+      .when(i === current, el => el.bg(t.selected).rounded(6))
+      .child(part.text !== undefined
+        ? TextView.markdown(`files-md-${this.file}-${finding ? "f" : ""}${i}`, part.text).selectable(true).on_link_click((url, cx) => this.followLink(url, cx))
+        : part.diagram ? this.mdDiagram(part, i, t) : this.mdImage(part, i, t)));
+  }
+
+  // ---- search: by file name (every file under the folder, filtered as you type) or by content (rg / git grep / grep)
+
+  openSearch(cx) {
+    if (this.search) { this.search.input.focus(); return; }
+    const input = InputState.new({ placeholder: "Search this folder…" });
+    const s = this.search = { input, mode: "names", query: "", list: null, listing: null, names: null, grep: null, searching: false, runs: 0, typed: 0, error: null };
+    input.on("change", (_e, cx) => this.searchChanged(cx));
+    input.on("submit", (_e, cx) => this.searchSubmit(cx));
+    this.menu = null; this.edit = null; this.trashing = null;
+    input.focus();
+    cx.timer.after(50, () => { if (this.search === s) input.focus(); });
+    this.runSearch(cx);
+    cx.notify();
+  }
+
+  closeSearch(cx) {
+    this.search?.input.release(); this.search = null;
+    cx.notify();
+  }
+
+  // Results replace the tree while there is something typed.
+  searching() { return Boolean(this.search?.input.value().trim()); }
+
+  searchMode(mode, cx) {
+    const s = this.search;
+    if (!s || s.mode === mode) return;
+    s.mode = mode; s.error = null;
+    if (mode === "names") s.list = null; // the folder may have changed meanwhile
+    s.input.focus();
+    this.runSearch(cx);
+  }
+
+  // Names filter at once; contents run 400 ms after the last key (or on Enter).
+  searchChanged(cx) {
+    const s = this.search;
+    if (!s) return;
+    if (s.mode === "names") { this.runSearch(cx); return; }
+    const typed = ++s.typed;
+    cx.timer.after(400, cx => { if (this.search === s && s.typed === typed) this.runSearch(cx); });
+    cx.notify();
+  }
+
+  searchSubmit(cx) {
+    const s = this.search;
+    if (!s) return;
+    if (s.mode === "contents") { s.typed++; this.runSearch(cx); return; }
+    const first = s.names?.items[0];
+    if (first) this.openHit(first, cx);
+  }
+
+  runSearch(cx) {
+    const s = this.search;
+    if (!s || !this.root) return;
+    const query = s.input.value().trim(), context = this.context, root = this.root, on = this.on ?? null;
+    s.query = query;
+    if (!on && window()?.platform === "windows") { s.error = "Search needs sh, not available on Windows yet"; cx.notify(); return; }
+    if (s.mode === "names") {
+      if (s.list) { s.names = query ? matchNames(s.list.entries, query) : null; cx.notify(); return; }
+      if (s.listing === context) return;
+      s.listing = context; s.error = null; cx.notify();
+      cx.spawn(async cx => {
+        try {
+          const list = await listAll(root, on);
+          if (this.search === s && s.listing === context && this.current(context)) { s.list = list; s.names = s.query ? matchNames(list.entries, s.query) : null; }
+        } catch (e) { if (this.search === s && s.listing === context) s.error = String(e?.message ?? e); }
+        finally { if (this.search === s && s.listing === context) s.listing = null; cx.notify(); }
+      });
+      return;
+    }
+    if (query.length < 2) { s.grep = null; s.searching = false; s.runs++; cx.notify(); return; }
+    if (s.grep?.query === query && s.grep.context === context) return;
+    const run = ++s.runs;
+    s.searching = true; s.error = null; cx.notify();
+    cx.spawn(async cx => {
+      try {
+        const r = await grepContents(root, on, query);
+        if (this.search === s && s.runs === run && this.current(context)) s.grep = { ...r, query, context };
+      } catch (e) { if (this.search === s && s.runs === run) s.error = String(e?.message ?? e); }
+      finally { if (this.search === s && s.runs === run) s.searching = false; cx.notify(); }
+    });
+  }
+
+  // The input, Names / Contents, and what the search found.
+  searchBar(t) {
+    const s = this.search, q = s.input.value().trim(), g = s.grep?.query === q ? s.grep : null;
+    const n = x => x.toLocaleString("en-US");
+    const status = s.error ? s.error
+      : s.mode === "names"
+        ? s.listing ? "Reading the file list…"
+        : !s.list ? ""
+        : !q ? `${n(s.list.entries.length)} entries${s.list.limited ? " (the first ones)" : ""}`
+        : !s.names?.total ? "No matching names"
+        : `${n(s.names.total)} ${s.names.total === 1 ? "match" : "matches"}${s.names.total > s.names.items.length ? `, first ${n(s.names.items.length)} shown` : ""}`
+      : q.length < 2 ? "Type at least 2 characters"
+        : s.searching ? "Searching…"
+        : !g ? "Enter searches"
+        : !g.count ? `No matches · ${g.tool}`
+        : `${n(g.count)} ${g.count === 1 ? "line" : "lines"} in ${n(g.files.length)} ${g.files.length === 1 ? "file" : "files"}${g.limited ? ` (first ${n(MAX_LINES)})` : ""} · ${g.tool}`;
+    return v_flex().id("files-search").flex_none().gap(5).px(8).pt(8).pb(6).border_b(1).border_color(t.border)
+      .on_key_down((e, cx) => { if (e.key === "escape") { cx.stop_propagation(); this.closeSearch(cx); } })
+      .child(h_flex().gap(5).items_center()
+        .child(Input.new(s.input).flex_1().min_w(0).h(26).px(6).rounded(6).border_1().border_color(t.accent).bg(t.background).text_size(13).text_color(t.foreground))
+        .child(this.button("files-search-x", "✕", cx => this.closeSearch(cx), t)))
+      .child(h_flex().gap(5).items_center()
+        .child(this.button("files-search-names", "Names", cx => this.searchMode("names", cx), t, s.mode === "names" ? "primary" : undefined))
+        .child(this.button("files-search-text", "Contents", cx => this.searchMode("contents", cx), t, s.mode === "contents" ? "primary" : undefined))
+        .child(div().flex_1().min_w(0).truncate().text_right().text_size(11).text_color(s.error ? t.ansi1 : t.dim).child(status)));
+  }
+
+  // Text with the matched parts in the accent color.
+  marked(text, query, whole, t) {
+    return h_flex().min_w(0).overflow_hidden().children(highlight(text, query, whole).map(seg =>
+      div().flex_none().whitespace_nowrap().when(seg.hit, el => el.text_color(t.accent).font_semibold()).child(seg.s)));
+  }
+
+  searchRows(t) {
+    const s = this.search, q = s.input.value().trim(), out = [];
+    if (s.mode === "names") {
+      for (const e of s.names?.items ?? []) {
+        const mark = this.marks[`${this.root}/${e.path}`];
+        out.push(h_flex().id(`fsr-${e.path}`).h(28).flex_none().px(8).gap(7).items_center().rounded(7).cursor_pointer().hover(st => st.bg(t.hover))
+          .tooltip(e.path).on_click((_e, cx) => this.openHit(e, cx))
+          .child(svg(`mods/files-plus/${e.dir ? "folder" : "file"}.svg`).size(14).flex_none().text_color(t.muted))
+          .child(this.marked(baseOf(e.path), q, false, t))
+          .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(parentOf(e.path)))
+          .when(Boolean(mark), el => el.child(div().flex_none().text_size(11).text_color(mark === "A" ? t.ansi2 : mark === "D" || mark === "U" ? t.ansi1 : t.blocked).child(mark))));
+      }
+      return out;
+    }
+    const g = s.grep?.query === q ? s.grep : null;
+    let shown = 0;
+    for (const f of g?.files ?? []) {
+      if (shown >= 600) { out.push(div().p(8).text_size(11).text_color(t.dim).child("More matches: type more to narrow the search")); break; }
+      out.push(h_flex().id(`fsf-${f.path}`).h(26).flex_none().px(8).mt(out.length ? 4 : 0).gap(7).items_center().rounded(7).cursor_pointer().hover(st => st.bg(t.hover))
+        .tooltip(f.path).on_click((_e, cx) => this.openLine(f.path, f.lines[0]?.line, q, cx))
+        .child(svg("mods/files-plus/file.svg").size(14).flex_none().text_color(t.muted))
+        .child(div().flex_none().font_semibold().child(baseOf(f.path)))
+        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(parentOf(f.path)))
+        .child(div().flex_none().text_size(11).text_color(t.dim).child(String(f.lines.length))));
+      for (const l of f.lines) {
+        if (shown++ >= 600) break;
+        out.push(h_flex().id(`fsl-${f.path}:${l.line}`).h(20).flex_none().pl(14).pr(8).gap(8).items_center().rounded(5).cursor_pointer().hover(st => st.bg(t.hover))
+          .on_click((_e, cx) => this.openLine(f.path, l.line, q, cx))
+          .child(div().w(34).flex_none().text_right().text_size(11).text_color(t.dim).child(String(l.line)))
+          .child(this.marked(excerpt(l.text, q), q, true, t).flex_1().font_family(settings().font_family).text_size(12).text_color(t.muted)));
+      }
+    }
+    return out;
+  }
+
+  // A name hit: a folder opens in the tree (with its parents), a file opens as a click on it would.
+  openHit(e, cx) {
+    if (!e.dir) { this.anchor = e.path; this.open(e.path, { name: baseOf(e.path), dir: false }, cx); cx.notify(); return; }
+    const parts = e.path.split("/");
+    for (let i = 1; i <= parts.length; i++) { const f = parts.slice(0, i).join("/"); if (!this.folders.has(f)) this.toggle(f, cx); }
+    this.closeSearch(cx);
+  }
+
+  // A content hit: the file's source with the match selected (← comes back to the results).
+  openLine(path, line, query, cx) {
+    this.show(path, cx, null, line ? { line, query } : undefined);
+    cx.notify();
+  }
+
+  // Selects the match on `at.line` (or the whole line) and puts the keyboard there; again once the editor is drawn.
+  reveal(code, at, cx) {
+    const apply = () => {
+      if (this.code !== code) return;
+      const lines = code.value().split("\n"), i = Math.max(0, Math.min(at.line - 1, lines.length - 1));
+      let start = 0;
+      for (let k = 0; k < i; k++) start += lines[k].length + 1;
+      const k = at.query ? lines[i].toLowerCase().indexOf(at.query.toLowerCase()) : -1;
+      code.set_selected_range(k >= 0 ? { start: start + k, end: start + k + at.query.length } : { start, end: start + lines[i].length });
+      code.focus();
+    };
+    apply();
+    cx.timer.after(80, () => apply());
   }
 
   // Opens a file by kind: folder, image, audio (bar below), video (system player), else text.
@@ -873,6 +1201,7 @@ export default class Files extends View {
       .when(this.history.length > 0, el => el.child(div().id("files-view-back").w(20).cursor_pointer().text_color(t.muted)
         .on_click((_e, cx) => { this.show(this.history.pop(), cx); cx.notify(); }).child("←")))
       .child(div().flex_1().min_w(0).truncate().font_semibold().child(this.file ?? ""))
+      .when(Boolean(this.code), el => el.child(this.findButton("files-view-find", t)))
       .when(Boolean(this.code) && PREVIEWABLE.test(this.file ?? ""), el => el.child(this.button("files-view-mode", this.preview ? "Source" : "Preview", cx => { this.preview = !this.preview; this.loadMdImages(cx); cx.notify(); }, t)))
       .when(this.pdf?.status === "ready", el => el.child(this.button("files-view-open", "Open", () => { exec(window()?.platform === "macos" ? "open" : "xdg-open", [this.pdf.local]).catch(() => null); }, t)))
       .child(div().id("files-view-close").w(20).flex_none().text_center().cursor_pointer().text_color(t.muted).hover(s => s.text_color(t.foreground))
@@ -880,6 +1209,7 @@ export default class Files extends View {
   }
 
   async close(_cx) {
+    if (this.viewer && shared(VIEWER_OPEN) === this.viewerId) setShared(VIEWER_OPEN, null);
     for (const job of [this.transfer, ...this.queue]) if (job) job.cancelled = true;
     const pid = this.player?.track?.pid;
     if (pid) await exec("kill", [String(pid)]).catch(() => null);
